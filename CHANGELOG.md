@@ -1,3 +1,9 @@
+## [1.1.4] - 2026-04-19
+
+### Fixed
+- **NVIDIA Library Mapping (#30)**: Resolved `libnvidia-ml.so.1` missing errors by implementing dynamic host library discovery and bind-mounting. The script now automatically identifies and maps essential NVIDIA libraries into the LXC container.
+- **Host Driver Validation**: Added proactive checks to verify NVIDIA driver installation on the Proxmox host before allowing passthrough configuration.
+
 ## [1.1.3] - 2026-04-19
 
 ### Fixed
