@@ -1,9 +1,10 @@
-## [1.1.2] - 2026-03-25
+## [1.1.2] - 2026-04-19
 
 ### Added
-- **Intel N150 (Alder Lake-N) Support**: Optimized hardware detection and path configuration for newer CPU families.
-- **SR-IOV Support**: The script now detects multiple render nodes and prompts the user to select the appropriate Virtual Function (VF).
-- Enhanced `lspci` validation with numeric IDs (`-nn`) for better hardware identification.
+- **Intel Alder Lake-N Support**: Performance optimizations and tailored hardware detection for N95, N100, and N150 processors.
+- **SR-IOV (Virtual GPU) Support**: Automatic detection of multiple render nodes (Virtual Functions) with an interactive selection prompt.
+- **Template Storage Flexibility**: Moved template storage to a configurable `$TEMPLATE_STORAGE` variable (defaulting to `local`) to support custom Proxmox storage configurations.
+- Enhanced hardware identification using `lspci -nn` for more reliable chip detection.
 
 ## [1.1.1-debug.2] - 2026-03-24
 
