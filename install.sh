@@ -11,7 +11,7 @@ set -euo pipefail
 # GLOBAL VARIABLES
 # ============================================================================
 
-VERSION="1.1.2"
+VERSION="1.1.3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/tmp/frigate-install-$(date +%Y%m%d-%H%M%S).log"
 DRY_RUN=false
@@ -36,7 +36,7 @@ CT_PRIVILEGED=1  # Must be privileged for iGPU passthrough
 CT_CORES=4
 CT_RAM=2048
 CT_DISK=10
-CT_STORAGE="local-lvm"
+CT_STORAGE=""
 CT_BRIDGE="vmbr0"
 CT_NETWORK_TYPE="dhcp"
 CT_IP=""
@@ -44,7 +44,7 @@ CT_GATEWAY=""
 CT_DNS="8.8.8.8"
 # Default (will be updated dynamically during install)
 DEBIAN_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
-TEMPLATE_STORAGE="local"
+TEMPLATE_STORAGE=""
 
 # Frigate Configuration
 FRIGATE_VERSION="stable"  # Docker tag: stable, beta, or specific version
@@ -108,6 +108,67 @@ execute() {
             log "Executing: $*"
         fi
         eval "$*" 2>&1 | tee -a "$LOG_FILE"
+    fi
+}
+
+# Detect storage pools by content type (e.g., images, vztmpl)
+get_storage_pools() {
+    local content_type=$1
+    pvesm status -content "$content_type" 2>/dev/null | awk 'NR>1 {print $1}'
+}
+
+# Helper for interactive storage selection
+select_storage_pool() {
+    local content_type=$1
+    local default_hint=$2
+    local prompt_msg=$3
+    local pools=($(get_storage_pools "$content_type"))
+
+    if [ ${#pools[@]} -eq 0 ]; then
+        log_warn "No storage pools found for content type '$content_type'."
+        read -p "Enter custom storage pool name: " selected_val
+        echo "$selected_val"
+        return
+    fi
+
+    # Identify default index
+    local default_index=""
+    for i in "${!pools[@]}"; do
+        if [[ "${pools[$i]}" == "$default_hint" ]]; then
+            default_index=$((i+1))
+            break
+        fi
+    done
+    
+    # Fallback default heuristics
+    if [ -z "$default_index" ]; then
+        for i in "${!pools[@]}"; do
+            if [[ "${pools[$i]}" == "local-lvm" || "${pools[$i]}" == "local" ]]; then
+                default_index=$((i+1))
+                break
+            fi
+        done
+        [ -z "$default_index" ] && default_index=1
+    fi
+
+    echo "Available storage pools supporting '$content_type':" >&2
+    for i in "${!pools[@]}"; do
+        echo "  $((i+1))) ${pools[$i]}" >&2
+    done
+    echo "  $(( ${#pools[@]} + 1 ))) Custom" >&2
+
+    local choice
+    local def_name="${pools[$((default_index-1))]}"
+    read -p "$prompt_msg [default: $default_index ($def_name)]: " choice
+    choice=${choice:-$default_index}
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -le "${#pools[@]}" ]; then
+        echo "${pools[$((choice-1))]}"
+    elif [ "$choice" -eq "$(( ${#pools[@]} + 1 ))" ]; then
+        read -p "Enter custom storage pool name: " custom_val
+        echo "$custom_val"
+    else
+        echo "$def_name"
     fi
 }
 
@@ -318,46 +379,18 @@ configure_container() {
     read -p "Enter RAM in MB (default: 2048): " input_ram
     CT_RAM="${input_ram:-2048}"
     
-    # Storage Pool Selection
+    # Storage Configuration
     echo ""
     log_step "Storage Configuration"
     
-    # Get list of storages that support images
-    STORAGE_OPTIONS=($(pvesm status -content images 2>/dev/null | awk 'NR>1 {print $1}'))
-    
-    if [ ${#STORAGE_OPTIONS[@]} -eq 0 ]; then
-        log_warn "Could not detect storage pools automatically. Defaulting to: $CT_STORAGE"
-    else
-        echo "Available storage pools:"
-        for i in "${!STORAGE_OPTIONS[@]}"; do
-            echo "  $((i+1))) ${STORAGE_OPTIONS[$i]}"
-        done
-        echo "  $(( ${#STORAGE_OPTIONS[@]} + 1 ))) Custom"
-        
-        # Identify default index for local-lvm
-        DEFAULT_INDEX=""
-        for i in "${!STORAGE_OPTIONS[@]}"; do
-            if [[ "${STORAGE_OPTIONS[$i]}" == "local-lvm" ]]; then
-                DEFAULT_INDEX=$((i+1))
-                break
-            fi
-        done
-        
-        PROMPT="Select storage pool"
-        [ -n "$DEFAULT_INDEX" ] && PROMPT="$PROMPT [default: $DEFAULT_INDEX (local-lvm)]"
-        read -p "$PROMPT: " storage_choice
-        storage_choice=${storage_choice:-$DEFAULT_INDEX}
-        
-        if [[ "$storage_choice" =~ ^[0-9]+$ ]] && [ "$storage_choice" -le "${#STORAGE_OPTIONS[@]}" ]; then
-            CT_STORAGE="${STORAGE_OPTIONS[$((storage_choice-1))]}"
-        elif [ "$storage_choice" -eq "$(( ${#STORAGE_OPTIONS[@]} + 1 ))" ]; then
-            read -p "Enter custom storage pool name: " CT_STORAGE
-        else
-            CT_STORAGE="local-lvm"
-            log_warn "Invalid selection. Defaulting to local-lvm."
-        fi
-        log "Selected storage pool: $CT_STORAGE"
-    fi
+    # LXC Root Filesystem Storage
+    CT_STORAGE=$(select_storage_pool "images" "local-lvm" "Select primary storage partition")
+    log "Selected primary storage: $CT_STORAGE"
+
+    # Template Storage (where Debian .tar.zst downloads go)
+    echo ""
+    TEMPLATE_STORAGE=$(select_storage_pool "vztmpl" "local" "Select storage for LXC templates")
+    log "Selected template storage: $TEMPLATE_STORAGE"
 
     echo ""
     read -p "Enter disk size in GB (default: 10): " input_disk
@@ -368,29 +401,16 @@ configure_container() {
     read -p "Add a separate disk for recordings? (y/N): " add_recordings_disk
     if [[ "$add_recordings_disk" =~ ^[Yy]$ ]]; then
         ADD_EXTRA_DISK=true
-        echo "Select storage pool for recordings:"
-        for i in "${!STORAGE_OPTIONS[@]}"; do
-            echo "  $((i+1))) ${STORAGE_OPTIONS[$i]}"
-        done
-        echo "  $(( ${#STORAGE_OPTIONS[@]} + 1 ))) Custom"
-        
-        read -p "Select storage pool [default: local-lvm]: " extra_choice
-        if [ -z "$extra_choice" ]; then
-            EXTRA_DISK_STORAGE="local-lvm"
-        elif [[ "$extra_choice" =~ ^[0-9]+$ ]] && [ "$extra_choice" -le "${#STORAGE_OPTIONS[@]}" ]; then
-            EXTRA_DISK_STORAGE="${STORAGE_OPTIONS[$((extra_choice-1))]}"
-        elif [ "$extra_choice" -eq "$(( ${#STORAGE_OPTIONS[@]} + 1 ))" ]; then
-            read -p "Enter custom storage pool name: " EXTRA_DISK_STORAGE
-        else
-            EXTRA_DISK_STORAGE="local-lvm"
-        fi
+        echo ""
+        EXTRA_DISK_STORAGE=$(select_storage_pool "images" "local-lvm" "Select recordings storage partition")
         log "Selected recordings storage: $EXTRA_DISK_STORAGE"
+        
         read -p "Enter recordings disk size in GB (default: 50): " input_extra_disk
         EXTRA_DISK_SIZE="${input_extra_disk:-50}"
     else
         ADD_EXTRA_DISK=false
     fi
-    
+
     echo ""
     echo "Network Configuration:"
     echo "  1) DHCP (automatic)"

@@ -1,3 +1,9 @@
+## [1.1.3] - 2026-04-19
+
+### Fixed
+- **Storage Resilience (#26)**: Replaced hardcoded `local-lvm` references with dynamic storage discovery. The script now queries available pools and provides a robust interactive selection with intelligent fallbacks (LVM -> ZFS -> Local).
+- **Template Storage Selection**: Added interactive selection for the template storage pool, allowing users with custom storage setups to specify where Debian images are stored.
+
 ## [1.1.2] - 2026-04-19
 
 ### Added
