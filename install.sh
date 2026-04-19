@@ -440,6 +440,16 @@ configure_container() {
         else
             ENABLE_IGPU="yes"
         fi
+    else
+        echo ""
+        log_warn "Integrated GPU (iGPU) not detected for hardware-accelerated video decoding."
+        if [ "$DETECTED_CORAL" != "none" ]; then
+            log "Note: Google Coral ($DETECTED_CORAL) WAS detected and will be used for high-speed object detection."
+            log "However, video streams will be decoded using the CPU, which may increase load."
+        else
+            log "If you have an Intel CPU with iGPU, ensure 'HEVC' or 'iGPU' is enabled in BIOS and drivers are installed on the host."
+        fi
+        ENABLE_IGPU="no"
     fi
 
     # Handle multiple render nodes (SR-IOV)
@@ -460,17 +470,6 @@ configure_container() {
                 log_error "Invalid selection"
             fi
         done
-    fi
-    else
-        echo ""
-        log_warn "Integrated GPU (iGPU) not detected for hardware-accelerated video decoding."
-        if [ "$DETECTED_CORAL" != "none" ]; then
-            log "Note: Google Coral ($DETECTED_CORAL) WAS detected and will be used for high-speed object detection."
-            log "However, video streams will be decoded using the CPU, which may increase load."
-        else
-            log "If you have an Intel CPU with iGPU, ensure 'HEVC' or 'iGPU' is enabled in BIOS and drivers are installed on the host."
-        fi
-        ENABLE_IGPU="no"
     fi
     
     echo ""
