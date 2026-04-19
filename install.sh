@@ -11,7 +11,7 @@ set -euo pipefail
 # GLOBAL VARIABLES
 # ============================================================================
 
-VERSION="1.1.5"
+VERSION="1.1.6"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/tmp/frigate-install-$(date +%Y%m%d-%H%M%S).log"
 DRY_RUN=false
@@ -359,10 +359,25 @@ check_hardware() {
     fi
 
     # Coral Detection
-    if lsusb 2>/dev/null | grep -Eqi "18d1:9302|Google Inc|Global Unichip Corp"; then
+    local coral_usb_info
+    coral_usb_info=$(lsusb 2>/dev/null | grep -Ei "18d1:9302|1a6e:089a|Google Inc|Global Unichip Corp" | head -n 1)
+
+    if [ -n "$coral_usb_info" ]; then
         DETECTED_CORAL="USB"
         log_success "Detected Google Coral (USB)"
-    elif lspci 2>/dev/null | grep -qi "089a\|Global Unichip Corp"; then
+        
+        # Speed Detection (Issue #19)
+        local dev_num=$(echo "$coral_usb_info" | awk '{print $4}' | sed 's/://')
+        local speed
+        speed=$(lsusb -t 2>/dev/null | grep "Dev $dev_num" | grep -o "[0-9]\+M" | head -n 1)
+        
+        if [ "$speed" = "480M" ]; then
+            log_warn "Coral USB is running at 480Mbps (USB 2.0). Performance may be throttled!"
+            log_warn "Recommendation: Use a USB 3.0 (blue) port and verify 'USB3' is enabled in Proxmox passthrough."
+        elif [ -n "$speed" ]; then
+            log "Coral USB speed: $speed"
+        fi
+    elif lspci 2>/dev/null | grep -qi "089a\|089b\|Global Unichip Corp"; then
         DETECTED_CORAL="PCIe"
         log_success "Detected Google Coral (PCIe)"
         # Check for host driver (Gasket/EdgeTPU)

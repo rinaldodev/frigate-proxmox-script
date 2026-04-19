@@ -1,3 +1,8 @@
+## [1.1.6] - 2026-04-19
+
+### Fixed
+- **Coral USB 3.0 Detection (#19)**: Enhanced hardware discovery with expanded Vendor/Product ID matching. Added proactive USB bus speed validation to warn users if their Coral is running at throttled (USB 2.0) speeds.
+
 ## [1.1.5] - 2026-04-19
 
 ### Fixed
