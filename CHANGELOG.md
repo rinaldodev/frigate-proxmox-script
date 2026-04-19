@@ -1,3 +1,8 @@
+## [1.1.9] - 2026-04-19
+
+### Added
+- **VLAN Awareness (#29)**: Added support for specifying a VLAN tag during installation via a hidden `--vlan <tag>` command-line flag. This allows advanced users to isolate the container at the network level without cluttering the interactive setup for standard users.
+
 ## [1.1.8] - 2026-04-19
 
 ### Added

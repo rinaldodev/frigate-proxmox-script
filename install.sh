@@ -11,7 +11,7 @@ set -euo pipefail
 # GLOBAL VARIABLES
 # ============================================================================
 
-VERSION="1.1.8"
+VERSION="1.1.9"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/tmp/frigate-install-$(date +%Y%m%d-%H%M%S).log"
 DRY_RUN=false
@@ -38,6 +38,7 @@ CT_CORES=4
 CT_RAM=2048
 CT_DISK=10
 CT_STORAGE=""
+CT_VLAN=""
 CT_BRIDGE="vmbr0"
 CT_NETWORK_TYPE="dhcp"
 CT_IP=""
@@ -773,6 +774,10 @@ create_lxc_container() {
         net_config="name=eth0,bridge=$CT_BRIDGE,ip=dhcp"
     fi
     
+    if [ -n "$CT_VLAN" ]; then
+        net_config+=",tag=$CT_VLAN"
+    fi
+    
     local pct_cmd="pct create $CT_ID $TEMPLATE_STORAGE:vztmpl/$DEBIAN_TEMPLATE \
         --hostname $CT_HOSTNAME \
         --cores $CT_CORES \
@@ -1415,6 +1420,7 @@ USAGE:
 OPTIONS:
     --dry-run     Run in simulation mode (no actual changes)
     --verbose     Enable verbose output
+    --vlan TAG    Specify a VLAN tag for the container network
     --help        Show this help message
 
 DESCRIPTION:
@@ -1444,6 +1450,10 @@ parse_arguments() {
             --help|-h)
                 show_usage
                 exit 0
+                ;;
+            --vlan)
+                CT_VLAN="$2"
+                shift 2
                 ;;
             *)
                 log_error "Unknown option: $1"
