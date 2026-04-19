@@ -11,11 +11,12 @@ set -euo pipefail
 # GLOBAL VARIABLES
 # ============================================================================
 
-VERSION="1.1.7"
+VERSION="1.1.8"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/tmp/frigate-install-$(date +%Y%m%d-%H%M%S).log"
 DRY_RUN=false
 VERBOSE=false
+REBOOT_REQUIRED=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -820,6 +821,7 @@ lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
 lxc.apparmor.profile = unconfined
 EOF
         log_success "iGPU passthrough and Apparmor profile configured in $lxc_conf"
+        REBOOT_REQUIRED=true
     else
         log_dry_run "Add iGPU passthrough and Apparmor configuration to $lxc_conf"
     fi
@@ -843,6 +845,7 @@ lxc.cgroup2.devices.allow: c 120:* rwm
 lxc.mount.entry: /dev/apex_0 dev/apex_0 none bind,optional,create=file
 EOF
             log_success "Coral PCIe passthrough configured in $lxc_conf"
+            REBOOT_REQUIRED=true
         else
             log "Coral PCIe passthrough already configured in $lxc_conf"
         fi
@@ -910,8 +913,30 @@ EOF
                 fi
             fi
         done
+        REBOOT_REQUIRED=true
     else
         log_dry_run "Add NVIDIA GPU passthrough and library mapping to $lxc_conf"
+    fi
+}
+
+check_reboot() {
+    if [ "$REBOOT_REQUIRED" = true ]; then
+        echo ""
+        log_warn "Hardware passthrough was configured. A container reboot is required for changes to take effect."
+        if [ "$DRY_RUN" = true ]; then
+            log_dry_run "Would prompt for reboot of container $CT_ID"
+            return
+        fi
+        
+        read -p "Reboot container $CT_ID now? (y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            log "Rebooting container $CT_ID..."
+            pct reboot "$CT_ID"
+            log_success "Container rebooted successfully."
+        else
+            log_info "Please remember to reboot container $CT_ID manually."
+        fi
     fi
 }
 
@@ -1598,6 +1623,7 @@ main() {
         fi
     fi
     
+    check_reboot
     echo ""
     log "Installation completed at $(date)"
 }

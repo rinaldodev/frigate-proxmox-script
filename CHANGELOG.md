@@ -1,3 +1,8 @@
+## [1.1.8] - 2026-04-19
+
+### Added
+- **Auto-reboot LXC (#29)**: Added a smart prompt at the end of the installation to automatically reboot the container if hardware passthrough (GPU/Coral) was configured, ensuring devices initialize correctly.
+
 ## [1.1.7] - 2026-04-19
 
 ### Changed
