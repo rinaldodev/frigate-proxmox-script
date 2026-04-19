@@ -1,3 +1,8 @@
+## [1.1.7] - 2026-04-19
+
+### Changed
+- **Docker Compose v2 Standardization (#25)**: Modernized the installation by renaming `docker-compose.yml` to `compose.yml` and updating all commands and log messages to use the `docker compose` syntax.
+
 ## [1.1.6] - 2026-04-19
 
 ### Fixed

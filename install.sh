@@ -11,7 +11,7 @@ set -euo pipefail
 # GLOBAL VARIABLES
 # ============================================================================
 
-VERSION="1.1.6"
+VERSION="1.1.7"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/tmp/frigate-install-$(date +%Y%m%d-%H%M%S).log"
 DRY_RUN=false
@@ -1064,7 +1064,7 @@ create_frigate_directories() {
 }
 
 create_docker_compose() {
-    log_step "Creating docker-compose.yml..."
+    log_step "Creating compose.yml..."
     
     local devices_list=""
     local deploy_config=""
@@ -1111,7 +1111,7 @@ $deploy_config"
     fi
     
     if [ "$DRY_RUN" = false ]; then
-        pct exec "$CT_ID" -- bash -c "cat > /opt/frigate/docker-compose.yml" << EOF
+        pct exec "$CT_ID" -- bash -c "cat > /opt/frigate/compose.yml" << EOF
 version: "3.9"
 
 services:
@@ -1144,9 +1144,9 @@ $device_config
       - CAP_PERFMON
     shm_size: "$SHM_SIZE"
 EOF
-        log_success "docker-compose.yml created"
+        log_success "compose.yml created"
     else
-        log_dry_run "Create docker-compose.yml"
+        log_dry_run "Create compose.yml"
     fi
 }
 
