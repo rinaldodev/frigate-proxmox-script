@@ -11,7 +11,8 @@ set -euo pipefail
 # GLOBAL VARIABLES
 # ============================================================================
 
-VERSION="1.1.7"
+VERSION="1.2.0"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/tmp/frigate-install-$(date +%Y%m%d-%H%M%S).log"
 DRY_RUN=false
@@ -38,6 +39,7 @@ CT_RAM=2048
 CT_DISK=10
 CT_STORAGE=""
 CT_BRIDGE="vmbr0"
+CT_VLAN=""
 CT_NETWORK_TYPE="dhcp"
 CT_IP=""
 CT_GATEWAY=""
@@ -681,6 +683,9 @@ show_configuration_summary() {
         echo "  Recordings:      ${EXTRA_DISK_SIZE}GB on $EXTRA_DISK_STORAGE"
     fi
     echo "  Network Bridge:  $CT_BRIDGE"
+    if [ -n "$CT_VLAN" ]; then
+        echo "  VLAN Tag:        $CT_VLAN"
+    fi
     echo "  Network Type:    $CT_NETWORK_TYPE"
     if [ "$CT_NETWORK_TYPE" = "static" ]; then
         echo "  IP Address:      $CT_IP"
@@ -770,6 +775,10 @@ create_lxc_container() {
         net_config="name=eth0,bridge=$CT_BRIDGE,ip=$CT_IP,gw=$CT_GATEWAY"
     else
         net_config="name=eth0,bridge=$CT_BRIDGE,ip=dhcp"
+    fi
+    
+    if [ -n "$CT_VLAN" ]; then
+        net_config="$net_config,tag=$CT_VLAN"
     fi
     
     local pct_cmd="pct create $CT_ID $TEMPLATE_STORAGE:vztmpl/$DEBIAN_TEMPLATE \
@@ -1390,6 +1399,8 @@ USAGE:
 OPTIONS:
     --dry-run     Run in simulation mode (no actual changes)
     --verbose     Enable verbose output
+    --vlan TAG    Specify a VLAN tag for the container network
+    --bridge NAME Specify the network bridge to use (default: vmbr0)
     --help        Show this help message
 
 DESCRIPTION:
@@ -1419,6 +1430,14 @@ parse_arguments() {
             --help|-h)
                 show_usage
                 exit 0
+                ;;
+            --vlan)
+                CT_VLAN="$2"
+                shift 2
+                ;;
+            --bridge)
+                CT_BRIDGE="$2"
+                shift 2
                 ;;
             *)
                 log_error "Unknown option: $1"

@@ -1,3 +1,19 @@
+## [1.2.0] - 2026-04-20
+
+### Added
+- **Custom Network Bridge (#31)**: Added support for specifying the network bridge (e.g., `vmbr1`) during installation via a hidden `--bridge <name>` command-line flag. This allows advanced users to configure their specific network bridge without changing the interactive setup for standard users.
+- **VLAN Awareness (#29)**: Added support for specifying a VLAN tag during installation via a hidden `--vlan <tag>` command-line flag.
+
+## [1.1.9] - 2026-04-19
+
+### Added
+- **VLAN Awareness (#29)**: Added support for specifying a VLAN tag during installation via a hidden `--vlan <tag>` command-line flag. This allows advanced users to isolate the container at the network level without cluttering the interactive setup for standard users.
+
+## [1.1.8] - 2026-04-19
+
+### Added
+- **Auto-reboot LXC (#29)**: Added a smart prompt at the end of the installation to automatically reboot the container if hardware passthrough (GPU/Coral) was configured, ensuring devices initialize correctly.
+
 ## [1.1.7] - 2026-04-19
 
 ### Changed
@@ -26,6 +42,7 @@
 - **Template Storage Selection**: Added interactive selection for the template storage pool, allowing users with custom storage setups to specify where Debian images are stored.
 
 ## [1.1.2] - 2026-04-19
+
 
 ### Added
 - **Intel Alder Lake-N Support**: Performance optimizations and tailored hardware detection for N95, N100, and N150 processors.
