@@ -1,3 +1,15 @@
+## [1.2.3] - 2026-05-08
+
+### Fixed
+- **SHM Size Input Bug (#35)**: Fixed a critical bug where entering a raw number for SHM size (e.g., `1024`) would be interpreted by Docker as bytes instead of megabytes, leading to "No space left on device" errors and container crashes. The script now automatically appends `mb` to numeric inputs and validates the format.
+- **RAM Validation**: Added a safety check to ensure the LXC container RAM is sufficient for the requested SHM size, offering to automatically increase RAM if needed.
+
+## [1.2.2] - 2026-05-01
+
+### Fixed
+- **NVIDIA Passthrough Resilience**: Further improved major number detection for NVIDIA devices on the host.
+- **Debian 12 Template Fallback**: Improved reliability of template downloading and storage detection.
+
 ## [1.2.1] - 2026-04-29
 
 ### Fixed

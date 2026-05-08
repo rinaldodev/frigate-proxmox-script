@@ -11,7 +11,7 @@ set -euo pipefail
 # GLOBAL VARIABLES
 # ============================================================================
 
-VERSION="1.2.1"
+VERSION="1.2.3"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/tmp/frigate-install-$(date +%Y%m%d-%H%M%S).log"
@@ -599,8 +599,48 @@ configure_container() {
     read -p "Enter Frigate Auth port (default: 8971): " input_auth
     AUTH_PORT="${input_auth:-8971}"
     
-    read -p "Enter Frigate SHM size (default: 512mb): " input_shm
-    SHM_SIZE="${input_shm:-512mb}"
+    while true; do
+        read -p "Enter Frigate SHM size (default: 512mb): " input_shm
+        input_shm="${input_shm:-512mb}"
+        
+        # Append 'mb' if only numbers provided
+        if [[ "$input_shm" =~ ^[0-9]+$ ]]; then
+            input_shm="${input_shm}mb"
+        fi
+        
+        # Validate format (number followed by b, k, m, g)
+        if [[ ! "$input_shm" =~ ^[0-9]+[bk m g]b?$ ]]; then
+            log_error "Invalid SHM size format! Use e.g. 512mb, 1gb, 256m"
+            continue
+        fi
+
+        # Extract numeric value in MB for comparison with RAM
+        local shm_val_mb=0
+        local num=$(echo "$input_shm" | grep -oE '^[0-9]+')
+        local unit=$(echo "$input_shm" | grep -oE '[a-zA-Z]+' | tr '[:upper:]' '[:lower:]')
+        
+        case "$unit" in
+            g|gb) shm_val_mb=$((num * 1024)) ;;
+            m|mb) shm_val_mb=$num ;;
+            k|kb) shm_val_mb=$((num / 1024)) ;;
+            b) shm_val_mb=1 ;; # negligible
+        esac
+
+        if [ "$shm_val_mb" -ge "$CT_RAM" ]; then
+            log_warn "SHM size ($input_shm) is larger than or equal to total RAM (${CT_RAM}MB)!"
+            log_warn "This will cause the container to crash. Please increase RAM or decrease SHM."
+            read -p "Increase RAM to $((shm_val_mb + 512))MB? (Y/n): " confirm_ram
+            if [[ ! "$confirm_ram" =~ ^[Nn]$ ]]; then
+                CT_RAM=$((shm_val_mb + 512))
+                log "Updated RAM to ${CT_RAM}MB"
+            else
+                continue
+            fi
+        fi
+        
+        SHM_SIZE="$input_shm"
+        break
+    done
 
     echo ""
     echo "Frigate Docker Image:"
