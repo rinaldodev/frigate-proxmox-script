@@ -1248,6 +1248,7 @@ EOF
             log_success "NVIDIA GPU device nodes configured in $lxc_conf (Major: $nvidia_major, $uvm_major)"
         fi
     fi
+    fi
 
     # Library Mapping (Resilience for Issue #30)
     if [ "$DRY_RUN" = false ]; then
