@@ -1811,6 +1811,33 @@ EOF
     fi
 }
 
+set_container_notes() {
+    log_step "Setting container notes in Proxmox..."
+    
+    if [ "$DRY_RUN" = true ]; then
+        log_dry_run "pct set $CT_ID -description \"...\""
+        return
+    fi
+
+    local ip_address
+    ip_address=$(pct exec "$CT_ID" -- hostname -I | awk '{print $1}')
+    [ -z "$ip_address" ] && ip_address="[IP_ADDRESS]"
+
+    local notes="[FRIGATE NVR]
+- Container Type: Docker
+- HW Acceleration: ${SELECTED_GPU_TYPE:-None}
+- Coral TPU: ${DETECTED_CORAL:-None}
+- Installation Date: $(date +'%Y-%m-%d %H:%M:%S')
+- Web UI: http://${ip_address}:${FRIGATE_PORT:-5000}
+- Storage Path: /opt/frigate/storage"
+
+    if pct set "$CT_ID" -description "$notes" 2>/dev/null; then
+        log_success "Proxmox notes updated for container $CT_ID"
+    else
+        log_warn "Failed to update Proxmox notes"
+    fi
+}
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
@@ -1850,6 +1877,8 @@ main() {
     setup_ssh
     setup_samba
     setup_firewall
+    set_container_notes
+    
     create_snapshot
 
     echo ""
