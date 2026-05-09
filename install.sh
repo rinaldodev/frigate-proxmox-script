@@ -1811,30 +1811,50 @@ EOF
     fi
 }
 
-set_container_notes() {
-    log_step "Setting container notes in Proxmox..."
+create_container_summary_dashboard() {
+    log_step "Creating Proxmox summary dashboard..."
     
     if [ "$DRY_RUN" = true ]; then
-        log_dry_run "pct set $CT_ID -description \"...\""
+        log_dry_run "Set container description to professional dashboard"
         return
     fi
 
     local ip_address
-    ip_address=$(pct exec "$CT_ID" -- hostname -I | awk '{print $1}')
-    [ -z "$ip_address" ] && ip_address="[IP_ADDRESS]"
+    ip_address=$(pct exec "$CT_ID" -- hostname -I | awk '{print $1}' || echo "<IP_ADDRESS>")
+    
+    local coral_line=""
+    if [ -n "$DETECTED_CORAL" ] && [ "$DETECTED_CORAL" != "none" ]; then
+        coral_line="- Coral Detector: ${DETECTED_CORAL}\n"
+    fi
 
-    local notes="[FRIGATE NVR]
-- Container Type: Docker
-- HW Acceleration: ${SELECTED_GPU_TYPE:-None}
-- Coral TPU: ${DETECTED_CORAL:-None}
-- Installation Date: $(date +'%Y-%m-%d %H:%M:%S')
-- Web UI: http://${ip_address}:${FRIGATE_PORT:-5000}
-- Storage Path: /opt/frigate/storage"
+    # Construct Markdown Description
+    local description=$(echo -e "# Frigate Proxmox Script
 
-    if pct set "$CT_ID" -description "$notes" 2>/dev/null; then
-        log_success "Proxmox notes updated for container $CT_ID"
+**Quick Access**
+| Service | URL |
+| :--- | :--- |
+| Web UI | http://${ip_address}:${FRIGATE_PORT:-5000} |
+| go2rtc API | http://${ip_address}:${GO2RTC_PORT:-1984} |
+| Frigate Auth | https://${ip_address}:${AUTH_PORT:-8971} |
+
+**Hardware Profile**
+- GPU Acceleration: ${SELECTED_GPU_TYPE:-None}
+${coral_line}- SHM Size: ${SHM_SIZE:-512mb}
+- Resources: ${CT_RAM}MB RAM / ${CT_CORES} CPU Cores
+
+**File Locations**
+- Configuration: /opt/frigate/config/config.yml
+- Media Storage: /opt/frigate/storage
+
+---
+GitHub: [saihgupr/frigate-proxmox-script](https://github.com/saihgupr/frigate-proxmox-script)
+
+Support: [Buy me a coffee](https://ko-fi.com/saihgupr)")
+
+    if pct set "$CT_ID" --description "$description" 2>/dev/null; then
+        log_success "Proxmox summary dashboard created for container $CT_ID"
     else
-        log_warn "Failed to update Proxmox notes"
+        log_warn "Failed to create Proxmox summary dashboard"
     fi
 }
 
@@ -1877,7 +1897,7 @@ main() {
     setup_ssh
     setup_samba
     setup_firewall
-    set_container_notes
+    create_container_summary_dashboard
     
     create_snapshot
 
