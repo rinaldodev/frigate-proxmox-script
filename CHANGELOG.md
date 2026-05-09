@@ -1,3 +1,16 @@
+## [1.3.0] - 2026-05-09
+
+### Added
+- **Unprivileged LXC Support (#37)**: Added interactive support for creating unprivileged LXC containers. This improves security while providing a user-selectable prompt to fall back to privileged mode if required by specific hardware or kernel configurations.
+- **Modern Hardware Passthrough (PVE 8.2+)**: Implemented the modern `dev[n]` device mapping logic for Proxmox 8.2 and newer. This provides more robust hardware passthrough for NVIDIA GPUs, Intel iGPUs, and Coral TPUs while maintaining legacy fallback support for older PVE versions.
+- **Refined Configuration Notes**: Restored descriptive comments, AppArmor `unconfined` profiles, and custom Proxmox container description notes to ensure maximum visibility and compatibility.
+- **Improved Passthrough Security**: Unprivileged containers now include necessary idmap configurations and device permission adjustments to ensure hardware access remains functional without compromising security.
+
+### Fixed
+- **NVIDIA Passthrough Logic**: Resolved a syntax error in the NVIDIA configuration function that could prevent script execution when using complex passthrough scenarios.
+- **Silent Script Failures**: Fixed an issue where the script would terminate unexpectedly after container startup due to bash arithmetic expressions (`((counter++))`) returning non-zero exit codes under `set -e`.
+- **Contribution Recognition**: Integrated community-driven improvements for security and hardware compatibility (Special thanks to @HarmEllis).
+
 ## [1.2.3] - 2026-05-08
 
 ### Fixed

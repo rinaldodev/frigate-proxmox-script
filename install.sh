@@ -11,13 +11,14 @@ set -euo pipefail
 # GLOBAL VARIABLES
 # ============================================================================
 
-VERSION="1.2.3"
+VERSION="1.3.0"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/tmp/frigate-install-$(date +%Y%m%d-%H%M%S).log"
 DRY_RUN=false
 VERBOSE=false
 REBOOT_REQUIRED=false
+PVE_VERSION=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -34,12 +35,13 @@ echo -ne "\033]0;Frigate Proxmox Script\007"
 # Container Configuration
 CT_ID=""
 CT_HOSTNAME="frigate"
-CT_PRIVILEGED=1  # Must be privileged for iGPU passthrough
+CT_PRIVILEGED=0  # Security default: use unprivileged LXC
 CT_CORES=4
 CT_RAM=2048
 CT_DISK=10
 CT_STORAGE=""
 CT_VLAN=""
+CT_MTU=""
 CT_BRIDGE="vmbr0"
 CT_NETWORK_TYPE="dhcp"
 CT_IP=""
@@ -59,7 +61,9 @@ SHM_SIZE="256mb"
 ENABLE_SSH="no"
 SSH_USER="root"
 SSH_PASSWORD=""
+ENABLE_FIREWALL="yes"
 ENABLE_SAMBA="no"
+SAMBA_PASSWORD=""
 ROOT_PASSWORD=""
 DO_SNAPSHOT=false
 SNAPSHOT_NAME=""
@@ -74,6 +78,10 @@ DETECTED_RENDER_NODES=() # Array to store found render nodes
 SELECTED_RENDER_NODE="/dev/dri/renderD128"
 DETECTED_CORAL="none"
 GPU_PRESET="preset-vaapi" # Default to VAAPI (Intel/AMD)
+ENABLE_YOLO_MODEL=false
+YOLO_MODEL_SIZE="s"
+YOLO_IMG_SIZE="640"
+YOLO_MODEL_PATH=""
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -259,9 +267,9 @@ check_proxmox() {
         error_exit "This script must be run on a Proxmox VE host!"
     fi
     
-    local pve_version
-    pve_version=$(pveversion | grep "pve-manager" | cut -d'/' -f2 | cut -d'-' -f1)
-    log_success "Running on Proxmox VE $pve_version"
+    # Extract version for compatibility checks (e.g., 8.2)
+    PVE_VERSION=$(pveversion | grep "pve-manager" | cut -d'/' -f2 | cut -d'-' -f1 | cut -d'.' -f1,2)
+    log_success "Running on Proxmox VE $PVE_VERSION"
 }
 
 check_root() {
@@ -312,10 +320,11 @@ check_resources() {
     fi
 
     local avail_gb=$((avail / 1024 / 1024))
-    
+    local pct_int=${pct%%.*}
+
     if [ "$avail_gb" -lt 10 ]; then
         log_warn "Low space on pool '$CT_STORAGE': Only ${avail_gb}GB available. Recommended: 10GB+ for rootfs."
-    elif [ "$pct" -gt 90 ]; then
+    elif [ "$pct_int" -gt 90 ]; then
         log_warn "Storage pool '$CT_STORAGE' is ${pct}% full. This may cause issues during operation."
     else
         log_success "Storage pool '$CT_STORAGE' has ${avail_gb}GB available (${pct}% used)."
@@ -451,12 +460,12 @@ configure_container() {
     
     # Container ID
     while true; do
-        read -p "Enter Container ID [100-999] (default: auto): " input_id
+        read -p "Enter Container ID [100-9999] (default: auto): " input_id
         if [ -z "$input_id" ]; then
             CT_ID=$(pvesh get /cluster/nextid)
             log "Auto-selected Container ID: $CT_ID"
             break
-        elif [[ "$input_id" =~ ^[0-9]+$ ]] && [ "$input_id" -ge 100 ] && [ "$input_id" -le 999 ]; then
+        elif [[ "$input_id" =~ ^[0-9]+$ ]] && [ "$input_id" -ge 100 ] && [ "$input_id" -le 9999 ]; then
             if pct status "$input_id" &>/dev/null; then
                 log_error "Container ID $input_id already exists!"
             else
@@ -464,7 +473,7 @@ configure_container() {
                 break
             fi
         else
-            log_error "Invalid Container ID. Must be between 100-999."
+            log_error "Invalid Container ID. Must be between 100-9999."
         fi
     done
     
@@ -510,6 +519,33 @@ configure_container() {
 
     echo ""
     echo "Network Configuration:"
+
+    # Detect available Linux bridges
+    local available_bridges
+    mapfile -t available_bridges < <(ip link show type bridge 2>/dev/null | awk -F': ' '/^[0-9]+:/{print $2}' | sed 's/@.*//' | grep '^vmbr')
+    if [ ${#available_bridges[@]} -eq 0 ]; then
+        read -p "Enter network bridge (e.g., vmbr0): " input_bridge
+        CT_BRIDGE="${input_bridge:-vmbr0}"
+    elif [ ${#available_bridges[@]} -eq 1 ]; then
+        CT_BRIDGE="${available_bridges[0]}"
+        echo "  Network Bridge:  $CT_BRIDGE (auto-detected)"
+    else
+        echo "  Available bridges:"
+        for i in "${!available_bridges[@]}"; do
+            echo "    $((i+1))) ${available_bridges[$i]}"
+        done
+        while true; do
+            read -p "Select network bridge [1-${#available_bridges[@]}] (default: 1): " bridge_choice
+            bridge_choice=${bridge_choice:-1}
+            if [[ "$bridge_choice" =~ ^[0-9]+$ ]] && [ "$bridge_choice" -ge 1 ] && [ "$bridge_choice" -le "${#available_bridges[@]}" ]; then
+                CT_BRIDGE="${available_bridges[$((bridge_choice-1))]}"
+                break
+            else
+                log_error "Invalid selection."
+            fi
+        done
+    fi
+
     echo "  1) DHCP (automatic)"
     echo "  2) Static IP"
     read -p "Select network type (1/2): " net_choice
@@ -522,6 +558,24 @@ configure_container() {
         CT_DNS="${input_dns:-8.8.8.8}"
     else
         CT_NETWORK_TYPE="dhcp"
+    fi
+
+    read -p "Enter VLAN tag (optional, press Enter to skip): " input_vlan
+    if [ -n "$input_vlan" ]; then
+        if [[ "$input_vlan" =~ ^[0-9]+$ ]] && [ "$input_vlan" -ge 1 ] && [ "$input_vlan" -le 4094 ]; then
+            CT_VLAN="$input_vlan"
+        else
+            log_warn "Invalid VLAN tag '$input_vlan' (must be 1-4094). Skipping."
+        fi
+    fi
+
+    read -p "Enter MTU (optional, press Enter for default): " input_mtu
+    if [ -n "$input_mtu" ]; then
+        if [[ "$input_mtu" =~ ^[0-9]+$ ]] && [ "$input_mtu" -ge 576 ] && [ "$input_mtu" -le 9000 ]; then
+            CT_MTU="$input_mtu"
+        else
+            log_warn "Invalid MTU '$input_mtu' (must be 576-9000). Skipping."
+        fi
     fi
     
     echo ""
@@ -609,7 +663,7 @@ configure_container() {
         fi
         
         # Validate format (number followed by b, k, m, g)
-        if [[ ! "$input_shm" =~ ^[0-9]+[bkmg]b?$ ]]; then
+        if [[ ! "$input_shm" =~ ^[0-9]+([bkmg]|[bkmg]b)$ ]]; then
             log_error "Invalid SHM size format! Use e.g. 512mb, 1gb, 256m"
             continue
         fi
@@ -667,7 +721,51 @@ configure_container() {
     esac
     
     echo ""
-    
+
+    # YOLOv9 model (only for OpenVINO-capable GPUs)
+    if [ "$SELECTED_GPU_TYPE" = "intel" ] || [ "$SELECTED_GPU_TYPE" = "amd" ] || [ "$SELECTED_GPU_TYPE" = "vaapi" ]; then
+        echo ""
+        echo -n "Use custom YOLOv9 model (OpenVINO)? More accurate than default SSD. (y/N): "
+        read -r yolo_choice
+        if [[ "$yolo_choice" =~ ^[Yy]$ ]]; then
+            ENABLE_YOLO_MODEL=true
+            echo ""
+            echo "Model size (larger = more accurate, slower on iGPU):"
+            echo " 1) t - Tiny    (fastest)"
+            echo " 2) s - Small   [recommended]"
+            echo " 3) m - Medium"
+            echo " 4) c - Large"
+            echo " 5) e - Extra Large (slowest)"
+            while true; do
+                read -p "Select [1-5] (default: 2): " size_choice
+                size_choice=${size_choice:-2}
+                case "$size_choice" in
+                    1) YOLO_MODEL_SIZE="t"; break ;;
+                    2) YOLO_MODEL_SIZE="s"; break ;;
+                    3) YOLO_MODEL_SIZE="m"; break ;;
+                    4) YOLO_MODEL_SIZE="c"; break ;;
+                    5) YOLO_MODEL_SIZE="e"; break ;;
+                    *) log_error "Invalid selection" ;;
+                esac
+            done
+            echo ""
+            echo "Image size:"
+            echo " 1) 320 (faster)"
+            echo " 2) 640 (more accurate) [recommended]"
+            while true; do
+                read -p "Select [1-2] (default: 2): " img_choice
+                img_choice=${img_choice:-2}
+                case "$img_choice" in
+                    1) YOLO_IMG_SIZE="320"; break ;;
+                    2) YOLO_IMG_SIZE="640"; break ;;
+                    *) log_error "Invalid selection" ;;
+                esac
+            done
+            YOLO_MODEL_PATH="/config/model_cache/yolo/yolov9-${YOLO_MODEL_SIZE}-${YOLO_IMG_SIZE}.onnx"
+            log_success "YOLOv9-${YOLO_MODEL_SIZE} at ${YOLO_IMG_SIZE}px selected (export runs after installation)"
+        fi
+    fi
+
     echo ""
     echo ""
     log_step "Security Configuration"
@@ -708,37 +806,83 @@ configure_container() {
     else
         ENABLE_SSH="no"
     fi
+
+    # Container Security Level (Privileged vs Unprivileged)
+    echo ""
+    log_step "Container Security"
+    
+    local recommend_privileged=false
+    local reason=""
+    
+    # Simple version comparison for PVE < 8.2
+    local pve_major=$(echo "$PVE_VERSION" | cut -d. -f1)
+    local pve_minor=$(echo "$PVE_VERSION" | cut -d. -f2)
+    local pve_below_82=false
+    if [ "$pve_major" -lt 8 ] || { [ "$pve_major" -eq 8 ] && [ "$pve_minor" -lt 2 ]; }; then
+        pve_below_82=true
+    fi
+
+    if [ "$SELECTED_GPU_TYPE" = "nvidia" ]; then
+        recommend_privileged=true
+        reason="NVIDIA GPU detected (Privileged mode is significantly easier for NVIDIA drivers)"
+    elif [ "$DETECTED_CORAL" = "PCIe" ]; then
+        recommend_privileged=true
+        reason="Coral PCIe detected (Privileged mode recommended for Gasket/Apex drivers)"
+    elif [ "$pve_below_82" = true ]; then
+        recommend_privileged=true
+        reason="Proxmox version $PVE_VERSION is < 8.2 (Native dev[n] passthrough requires 8.2+)"
+    fi
+
+    echo "Select container security level:"
+    if [ "$recommend_privileged" = true ]; then
+        echo "  1) Privileged (Recommended - $reason)"
+        echo "  2) Unprivileged (Higher security, but hardware passthrough might fail on this setup)"
+        read -p "Selection [default: 1]: " security_choice
+        security_choice=${security_choice:-1}
+    else
+        echo "  1) Privileged (Legacy mode, lower security)"
+        echo "  2) Unprivileged (Recommended - Modern, higher security) [default]"
+        read -p "Selection [default: 2]: " security_choice
+        security_choice=${security_choice:-2}
+    fi
+
+    if [ "$security_choice" = "1" ]; then
+        CT_PRIVILEGED=1
+        log "Selected: Privileged Container (Security: Lower, Compatibility: High)"
+    else
+        CT_PRIVILEGED=0
+        log "Selected: Unprivileged Container (Security: High, Compatibility: Modern)"
+    fi
     
     echo ""
-    read -p "Enable Samba file sharing? (Y/n): " enable_samba
-    enable_samba=${enable_samba:-Y}
+    read -p "Enable Samba file sharing (config & storage only, password required)? (y/N): " enable_samba
+    enable_samba=${enable_samba:-N}
     if [[ "$enable_samba" =~ ^[Yy]$ ]]; then
         ENABLE_SAMBA="yes"
-        
-        # If SSH is disabled, we need to ask for a Samba password specifically
-        if [ "$ENABLE_SSH" != "yes" ]; then
+        while true; do
+            read -sp "Enter Samba password for user 'frigate': " SAMBA_PASSWORD
             echo ""
-            log_warn "Samba enabled but SSH disabled. You need to set a Samba password."
-            while true; do
-                read -sp "Enter Samba password: " SSH_PASSWORD
-                echo ""
-                
-                if [ -z "$SSH_PASSWORD" ]; then
-                    log_error "Password cannot be empty!"
-                    continue
-                fi
-                
-                read -sp "Confirm Samba password: " SAMBA_PASSWORD_CONFIRM
-                echo ""
-                
-                if [ "$SSH_PASSWORD" = "$SAMBA_PASSWORD_CONFIRM" ]; then
-                    break
-                else
-                    log_error "Passwords do not match! Please try again."
-                    echo ""
-                fi
-            done
-        fi
+            if [ -z "$SAMBA_PASSWORD" ]; then
+                log_error "Password cannot be empty!"
+                continue
+            fi
+            read -sp "Confirm Samba password: " samba_confirm
+            echo ""
+            if [ "$SAMBA_PASSWORD" = "$samba_confirm" ]; then
+                break
+            else
+                log_error "Passwords do not match! Please try again."
+            fi
+        done
+    fi
+
+    echo ""
+    read -p "Enable Proxmox firewall on container (opens port $FRIGATE_PORT)? (Y/n): " enable_fw
+    enable_fw=${enable_fw:-Y}
+    if [[ "$enable_fw" =~ ^[Yy]$ ]]; then
+        ENABLE_FIREWALL="yes"
+    else
+        ENABLE_FIREWALL="no"
     fi
 
     echo ""
@@ -759,7 +903,9 @@ show_configuration_summary() {
     echo "Container Settings:"
     echo "  ID:              $CT_ID"
     echo "  Hostname:        $CT_HOSTNAME"
-    echo "  Type:            Privileged LXC"
+    local security_label="Unprivileged"
+    [ "$CT_PRIVILEGED" = "1" ] && security_label="Privileged"
+    echo "  Type:            $security_label LXC"
     echo "  CPU Cores:       $CT_CORES"
     echo "  RAM:             ${CT_RAM}MB"
     echo "  Disk:            ${CT_DISK}GB"
@@ -770,6 +916,9 @@ show_configuration_summary() {
     echo "  Network Bridge:  $CT_BRIDGE"
     if [ -n "$CT_VLAN" ]; then
         echo "  VLAN Tag:        $CT_VLAN"
+    fi
+    if [ -n "$CT_MTU" ]; then
+        echo "  MTU:             $CT_MTU"
     fi
     echo "  Network Type:    $CT_NETWORK_TYPE"
     if [ "$CT_NETWORK_TYPE" = "static" ]; then
@@ -788,12 +937,16 @@ show_configuration_summary() {
     echo "  go2rtc Port:     $GO2RTC_PORT"
     echo "  Auth Port:       $AUTH_PORT"
     echo "  SHM Size:        $SHM_SIZE"
+    if [ "$ENABLE_YOLO_MODEL" = true ]; then
+        echo "  YOLO Model:      YOLOv9-${YOLO_MODEL_SIZE} @ ${YOLO_IMG_SIZE}px (OpenVINO)"
+    fi
     if [ "$ENABLE_SSH" = "yes" ]; then
         echo "  SSH User:        $SSH_USER"
     fi
     if [ "$ENABLE_SAMBA" = "yes" ]; then
-        echo "  Samba:           Enabled (3 shares)"
+        echo "  Samba:           Enabled (user: frigate, shares: Config + Storage)"
     fi
+    echo "  Firewall:        $ENABLE_FIREWALL"
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
@@ -855,13 +1008,21 @@ download_debian_template() {
 create_lxc_container() {
     log_step "Creating LXC container $CT_ID ($CT_HOSTNAME)..."
     
-    local net_config="name=eth0,bridge=$CT_BRIDGE,ip=$CT_NETWORK_TYPE"
+    local net_config="name=eth0,bridge=$CT_BRIDGE"
     if [ "$CT_NETWORK_TYPE" = "static" ]; then
-        net_config="$net_config=$CT_IP,gw=$CT_GATEWAY"
+        net_config="$net_config,ip=$CT_IP,gw=$CT_GATEWAY"
+    else
+        net_config="$net_config,ip=dhcp"
     fi
     
     if [ -n "$CT_VLAN" ]; then
         net_config="$net_config,tag=$CT_VLAN"
+    fi
+    if [ -n "$CT_MTU" ]; then
+        net_config="$net_config,mtu=$CT_MTU"
+    fi
+    if [ "$ENABLE_FIREWALL" = "yes" ]; then
+        net_config="$net_config,firewall=1"
     fi
 
     local password_part=""
@@ -879,8 +1040,8 @@ create_lxc_container() {
             --net0 "$net_config" \
             --onboot 1 \
             --ostype debian \
-            --unprivileged 0 \
-            --features nesting=1 \
+            --unprivileged $((1 - CT_PRIVILEGED)) \
+            --features nesting=1,keyctl=1 \
             $password_part 2>&1 | tee -a "$LOG_FILE" || error_exit "Failed to create container"
         
         log_success "Container created"
@@ -904,8 +1065,10 @@ configure_lxc_passthrough() {
             fi
         fi
         
-        # Coral USB Passthrough (usually handled by pct device add, but we'll do it manually if needed)
-        # Note: USB Passthrough is better handled via the UI or by mapping the specific vendor:product
+        # Coral Passthrough
+        if [ "$DETECTED_CORAL" = "PCIe" ]; then
+            configure_coral_pcie_passthrough
+        fi
         
         log_success "Passthrough configured"
     fi
@@ -916,22 +1079,59 @@ configure_igpu_passthrough() {
         return
     fi
     
-    log_step "Configuring Intel iGPU passthrough..."
+    log_step "Configuring iGPU passthrough..."
     
     local lxc_conf="/etc/pve/lxc/${CT_ID}.conf"
     
-    if [ "$DRY_RUN" = false ]; then
-        cat >> "$lxc_conf" << EOF
+    # Get device major/minor and GID
+    local dev_major=$(stat -c '%t' "$SELECTED_RENDER_NODE")
+    dev_major=$((0x$dev_major))
+    local dev_minor=$(stat -c '%T' "$SELECTED_RENDER_NODE")
+    dev_minor=$((0x$dev_minor))
+    
+    local render_gid
+    render_gid=$(getent group render 2>/dev/null | cut -d: -f3)
+    if [ -z "$render_gid" ]; then
+        render_gid=$(stat -c '%g' "$SELECTED_RENDER_NODE")
+    fi
 
-# Frigate: iGPU Passthrough + AppArmor
-lxc.cgroup2.devices.allow: c 226:* rwm
-lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
-lxc.apparmor.profile = unconfined
+    # Check PVE version
+    local pve_major=$(echo "$PVE_VERSION" | cut -d. -f1)
+    local pve_minor=$(echo "$PVE_VERSION" | cut -d. -f2)
+    local pve_82_plus=true
+    if [ "$pve_major" -lt 8 ] || { [ "$pve_major" -eq 8 ] && [ "$pve_minor" -lt 2 ]; }; then
+        pve_82_plus=false
+    fi
+
+    if [ "$DRY_RUN" = false ]; then
+        if [ "$pve_82_plus" = true ]; then
+            # Modern Proxmox 8.2+ way (Works for both Privileged/Unprivileged)
+            local dev_slot=0
+            while grep -q "^dev${dev_slot}:" "$lxc_conf" 2>/dev/null; do
+                dev_slot=$((dev_slot + 1))
+            done
+            echo "" >> "$lxc_conf"
+            echo "# Frigate: iGPU Passthrough + AppArmor" >> "$lxc_conf"
+            echo "dev${dev_slot}: $SELECTED_RENDER_NODE,gid=$render_gid" >> "$lxc_conf"
+            echo "lxc.apparmor.profile: unconfined" >> "$lxc_conf"
+            log_success "iGPU passthrough and AppArmor configured in $lxc_conf"
+        else
+            # Legacy way (< 8.2)
+            echo "" >> "$lxc_conf"
+            echo "# Frigate: iGPU Passthrough + AppArmor" >> "$lxc_conf"
+            cat >> "$lxc_conf" << EOF
+lxc.cgroup2.devices.allow: c $dev_major:$dev_minor rwm
+lxc.mount.entry: $SELECTED_RENDER_NODE dev/dri/$(basename "$SELECTED_RENDER_NODE") none bind,optional,create=file
+lxc.apparmor.profile: unconfined
 EOF
-        log_success "iGPU passthrough and Apparmor profile configured in $lxc_conf"
+            if [ "$CT_PRIVILEGED" = "0" ]; then
+                log_warn "Unprivileged iGPU passthrough on Proxmox < 8.2 may require manual GID mapping."
+            fi
+            log_success "iGPU passthrough configured using legacy cgroup2 method"
+        fi
         REBOOT_REQUIRED=true
     else
-        log_dry_run "Add iGPU passthrough and Apparmor configuration to $lxc_conf"
+        log_dry_run "Add iGPU passthrough configuration to $lxc_conf"
     fi
 }
 
@@ -943,49 +1143,43 @@ configure_coral_pcie_passthrough() {
     log_step "Configuring Google Coral PCIe passthrough..."
     
     local lxc_conf="/etc/pve/lxc/${CT_ID}.conf"
+    local apex_dev="/dev/apex_0"
     
+    # Check PVE version
+    local pve_major=$(echo "$PVE_VERSION" | cut -d. -f1)
+    local pve_minor=$(echo "$PVE_VERSION" | cut -d. -f2)
+    local pve_82_plus=true
+    if [ "$pve_major" -lt 8 ] || { [ "$pve_major" -eq 8 ] && [ "$pve_minor" -lt 2 ]; }; then
+        pve_82_plus=false
+    fi
+
     if [ "$DRY_RUN" = false ]; then
-        if ! grep -q "apex_0" "$lxc_conf"; then
+        if [ "$pve_82_plus" = true ]; then
+            # Modern Proxmox 8.2+ way
+            local apex_gid
+            apex_gid=$(stat -c '%g' "$apex_dev" 2>/dev/null || echo "0")
+            
+            local dev_slot=0
+            while grep -q "^dev${dev_slot}:" "$lxc_conf" 2>/dev/null; do
+                dev_slot=$((dev_slot + 1))
+            done
+            echo "" >> "$lxc_conf"
+            echo "# Frigate: Google Coral PCIe Passthrough" >> "$lxc_conf"
+            echo "dev${dev_slot}: $apex_dev,gid=$apex_gid" >> "$lxc_conf"
+            log_success "Coral PCIe passthrough configured using modern dev${dev_slot} method"
+        else
+            # Legacy way
             cat >> "$lxc_conf" << EOF
 
 # Frigate: Google Coral PCIe Passthrough
 lxc.cgroup2.devices.allow: c 120:* rwm
-lxc.mount.entry: /dev/apex_0 dev/apex_0 none bind,optional,create=file
+lxc.mount.entry: $apex_dev dev/apex_0 none bind,optional,create=file
 EOF
-            log_success "Coral PCIe passthrough configured in $lxc_conf"
-            REBOOT_REQUIRED=true
-        else
-            log "Coral PCIe passthrough already configured in $lxc_conf"
+            log_success "Coral PCIe passthrough configured using legacy method"
         fi
+        REBOOT_REQUIRED=true
     else
         log_dry_run "Add Coral PCIe passthrough configuration to $lxc_conf"
-    fi
-}
-
-configure_coral_usb_passthrough() {
-    # We enable USB passthrough if a Coral USB is detected OR if iGPU is enabled
-    # This matches user feedback that this mapping is often required for stability
-    if [ "$DETECTED_CORAL" != "USB" ] && [ "$ENABLE_IGPU" != "yes" ]; then
-        return
-    fi
-    
-    log_step "Configuring Google Coral USB passthrough..."
-    
-    local lxc_conf="/etc/pve/lxc/${CT_ID}.conf"
-    
-    if [ "$DRY_RUN" = false ]; then
-        if ! grep -q "/dev/bus/usb" "$lxc_conf"; then
-            cat >> "$lxc_conf" << EOF
-
-# Frigate: Google Coral USB Passthrough
-lxc.mount.entry: /dev/bus/usb dev/bus/usb none bind,optional,create=dir
-EOF
-            log_success "Coral USB passthrough configured in $lxc_conf"
-        else
-            log "Coral USB passthrough already configured in $lxc_conf"
-        fi
-    else
-        log_dry_run "Add Coral USB passthrough configuration to $lxc_conf"
     fi
 }
 
@@ -998,16 +1192,55 @@ configure_nvidia_passthrough() {
     
     local lxc_conf="/etc/pve/lxc/${CT_ID}.conf"
     
-    if [ "$DRY_RUN" = false ]; then
-        # Device Nodes
-        if ! grep -q "nvidia" "$lxc_conf"; then
-            # Get major numbers for devices (Resilience for Issue #30)
-            local nvidia_major=$(ls -l /dev/nvidiactl 2>/dev/null | awk '{print $5}' | cut -d, -f1 || echo "195")
-            local uvm_major=$(ls -l /dev/nvidia-uvm 2>/dev/null | awk '{print $5}' | cut -d, -f1 || echo "511")
-            
-            cat >> "$lxc_conf" << EOF
+    # Check PVE version
+    local pve_major=$(echo "$PVE_VERSION" | cut -d. -f1)
+    local pve_minor=$(echo "$PVE_VERSION" | cut -d. -f2)
+    local pve_82_plus=true
+    if [ "$pve_major" -lt 8 ] || { [ "$pve_major" -eq 8 ] && [ "$pve_minor" -lt 2 ]; }; then
+        pve_82_plus=false
+    fi
 
-# Frigate: NVIDIA GPU Passthrough
+    if [ "$DRY_RUN" = false ]; then
+        if [ "$pve_82_plus" = true ]; then
+            # Modern Proxmox 8.2+ way
+            local nvidia_devs=(
+                "/dev/nvidia0"
+                "/dev/nvidiactl"
+                "/dev/nvidia-modeset"
+                "/dev/nvidia-uvm"
+                "/dev/nvidia-uvm-tools"
+            )
+            
+            echo "" >> "$lxc_conf"
+            echo "# Frigate: NVIDIA GPU Passthrough + AppArmor" >> "$lxc_conf"
+            echo "lxc.apparmor.profile: unconfined" >> "$lxc_conf"
+            
+            for dev in "${nvidia_devs[@]}"; do
+                if [ -c "$dev" ]; then
+                    local dev_gid
+                    dev_gid=$(stat -c '%g' "$dev" 2>/dev/null || echo "0")
+                    
+                    local dev_slot=0
+                    while grep -q "^dev${dev_slot}:" "$lxc_conf" 2>/dev/null; do
+                        dev_slot=$((dev_slot + 1))
+                    done
+                    echo "dev${dev_slot}: $dev,gid=$dev_gid" >> "$lxc_conf"
+                    log "  Mapped $dev to dev${dev_slot} (gid=$dev_gid)"
+                fi
+            done
+            log_success "NVIDIA GPU device nodes configured using modern dev method"
+        else
+            # Legacy way
+            # Device Nodes
+            if ! grep -q "nvidia" "$lxc_conf"; then
+                # Get major numbers for devices (Resilience for Issue #30)
+                local nvidia_major=$(ls -l /dev/nvidiactl 2>/dev/null | awk '{print $5}' | cut -d, -f1 || echo "195")
+                local uvm_major=$(ls -l /dev/nvidia-uvm 2>/dev/null | awk '{print $5}' | cut -d, -f1 || echo "511")
+                
+                cat >> "$lxc_conf" << EOF
+
+# Frigate: NVIDIA GPU Passthrough + AppArmor
+lxc.apparmor.profile: unconfined
 lxc.cgroup2.devices.allow: c $nvidia_major:* rwm
 lxc.cgroup2.devices.allow: c $uvm_major:* rwm
 lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
@@ -1016,7 +1249,8 @@ lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,creat
 lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
 lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
 EOF
-            log_success "NVIDIA GPU device nodes configured in $lxc_conf (Major: $nvidia_major, $uvm_major)"
+                log_success "NVIDIA GPU device nodes configured in $lxc_conf (Major: $nvidia_major, $uvm_major)"
+            fi
         fi
 
         # Library Mapping (Resilience for Issue #30)
@@ -1101,7 +1335,7 @@ start_lxc_container() {
                 break
             fi
             sleep 1
-            ((counter++))
+            counter=$((counter + 1))
         done
         
         log_success "Container $CT_ID is running"
@@ -1172,7 +1406,7 @@ create_frigate_directories() {
 }
 
 create_docker_compose() {
-    log_step "Creating docker-compose.yml..."
+    log_step "Creating compose.yml..."
     
     local devices_list=""
     local deploy_config=""
@@ -1192,20 +1426,13 @@ create_docker_compose() {
         fi
     fi
 
-    # 2. Add Coral if detected
+    # 2. Add Coral PCIe if detected
     if [ "$DETECTED_CORAL" = "PCIe" ]; then
         if [ -n "$devices_list" ]; then
             devices_list="$devices_list
       - /dev/apex_0:/dev/apex_0"
         else
             devices_list="      - /dev/apex_0:/dev/apex_0"
-        fi
-    elif [ "$DETECTED_CORAL" = "USB" ] || [ "$ENABLE_IGPU" = "yes" ]; then
-        if [ -n "$devices_list" ]; then
-            devices_list="$devices_list
-      - /dev/bus/usb:/dev/bus/usb"
-        else
-            devices_list="      - /dev/bus/usb:/dev/bus/usb"
         fi
     fi
 
@@ -1226,7 +1453,21 @@ $deploy_config"
     fi
     
     if [ "$DRY_RUN" = false ]; then
-        pct exec "$CT_ID" -- bash -c "cat > /opt/frigate/docker-compose.yml" << EOF
+        local FRIGATE_RTSP_PASSWORD
+        FRIGATE_RTSP_PASSWORD=$(openssl rand -hex 16)
+
+        local group_add_config=""
+        if [ "$ENABLE_IGPU" = "yes" ] && [ "$SELECTED_GPU_TYPE" != "nvidia" ]; then
+            local render_gid
+            render_gid=$(getent group render 2>/dev/null | cut -d: -f3)
+            if [ -z "$render_gid" ]; then
+                render_gid=$(stat -c '%g' "$SELECTED_RENDER_NODE")
+            fi
+            group_add_config="    group_add:
+      - \"$render_gid\""
+        fi
+
+        pct exec "$CT_ID" -- bash -c "cat > /opt/frigate/compose.yml" << EOF
 version: "3.9"
 
 services:
@@ -1246,22 +1487,65 @@ services:
           size: 1000000000
     ports:
       - "$FRIGATE_PORT:$FRIGATE_PORT"
-      - "8554:8554"  # RTSP feeds
-      - "8555:8555/tcp"  # WebRTC
-      - "8555:8555/udp"  # WebRTC
-      - "$GO2RTC_PORT:$GO2RTC_PORT"  # go2rtc API
-      - "$AUTH_PORT:$AUTH_PORT"  # Frigate Auth port
 $device_config
     environment:
-      - FRIGATE_RTSP_PASSWORD=password
+      - FRIGATE_RTSP_PASSWORD=$FRIGATE_RTSP_PASSWORD
       - CONFIG_FILE=/config/config.yml
     cap_add:
       - CAP_PERFMON
     shm_size: "$SHM_SIZE"
+$group_add_config
 EOF
-        log_success "docker-compose.yml created"
+        log_success "compose.yml created"
     else
-        log_dry_run "Create docker-compose.yml"
+        log_dry_run "Create compose.yml"
+    fi
+}
+
+export_yolo_model() {
+    if [ "$ENABLE_YOLO_MODEL" = false ]; then
+        return
+    fi
+
+    log_step "Exporting YOLOv9-${YOLO_MODEL_SIZE} ONNX model (this may take several minutes)..."
+
+    local model_dir="/opt/frigate/config/model_cache/yolo"
+    local model_file="yolov9-${YOLO_MODEL_SIZE}-${YOLO_IMG_SIZE}.onnx"
+
+    if [ "$DRY_RUN" = false ]; then
+        pct exec "$CT_ID" -- mkdir -p "$model_dir"
+
+        pct exec "$CT_ID" -- bash -s << EXPORTSCRIPT
+cd "$model_dir"
+docker build --build-arg MODEL_SIZE=${YOLO_MODEL_SIZE} --build-arg IMG_SIZE=${YOLO_IMG_SIZE} --output . - << 'DOCKERFILE'
+FROM python:3.11 AS build
+RUN apt-get update && apt-get install --no-install-recommends -y cmake libgl1
+COPY --from=ghcr.io/astral-sh/uv:0.10.4 /uv /bin/
+WORKDIR /yolov9
+ADD https://github.com/WongKinYiu/yolov9.git .
+# torch<2.6: weights_only default changed to True in 2.6, breaking YOLOv9's torch.load calls in models/experimental.py
+RUN uv pip install --system "torch<2.6" -r requirements.txt
+RUN uv pip install --system onnx==1.18.0 onnxruntime onnx-simplifier onnxscript
+ARG MODEL_SIZE
+ARG IMG_SIZE
+ADD https://github.com/WongKinYiu/yolov9/releases/download/v0.1/yolov9-\${MODEL_SIZE}-converted.pt yolov9-\${MODEL_SIZE}.pt
+RUN python3 export.py --weights ./yolov9-\${MODEL_SIZE}.pt --imgsz \${IMG_SIZE} --simplify --include onnx
+FROM scratch
+ARG MODEL_SIZE
+ARG IMG_SIZE
+COPY --from=build /yolov9/yolov9-\${MODEL_SIZE}.onnx /yolov9-\${MODEL_SIZE}-\${IMG_SIZE}.onnx
+DOCKERFILE
+EXPORTSCRIPT
+
+        if pct exec "$CT_ID" -- test -f "$model_dir/$model_file"; then
+            log_success "Model exported: $model_file"
+        else
+            log_warn "YOLO model export failed. Falling back to default SSD model."
+            log_warn "You can export manually later and update config.yml."
+            ENABLE_YOLO_MODEL=false
+        fi
+    else
+        log_dry_run "Export YOLOv9-${YOLO_MODEL_SIZE} (${YOLO_IMG_SIZE}px) ONNX model inside container"
     fi
 }
 
@@ -1301,13 +1585,34 @@ create_frigate_config() {
   coral:
     type: edgetpu
     device: pci"
-    elif [ "$SELECTED_GPU_TYPE" = "intel" ]; then
+    elif [ "$SELECTED_GPU_TYPE" = "intel" ] || [ "$SELECTED_GPU_TYPE" = "amd" ] || [ "$SELECTED_GPU_TYPE" = "vaapi" ]; then
         detector_config="detectors:
   ov:
     type: openvino
-    device: GPU
+    device: GPU"
+        if [ "$ENABLE_YOLO_MODEL" = false ]; then
+            detector_config="$detector_config
     model:
       path: /openvino-model/ssdlite_mobilenet_v2.xml"
+        fi
+    fi
+
+    local yolo_model_config=""
+    if [ "$ENABLE_YOLO_MODEL" = true ]; then
+        yolo_model_config="model:
+  model_type: yolo-generic
+  width: $YOLO_IMG_SIZE
+  height: $YOLO_IMG_SIZE
+  input_tensor: nchw
+  input_dtype: float
+  path: $YOLO_MODEL_PATH
+  labelmap_path: /labelmap/coco-80.txt"
+    elif [ "$SELECTED_GPU_TYPE" = "intel" ] || [ "$SELECTED_GPU_TYPE" = "amd" ] || [ "$SELECTED_GPU_TYPE" = "vaapi" ]; then
+        # Frigate 0.17+ defaults to 320x320 tensor input; SSD MobileNet requires explicit 300x300
+        yolo_model_config="model:
+  width: 300
+  height: 300
+  path: /openvino-model/ssdlite_mobilenet_v2.xml"
     fi
 
     if [ "$DRY_RUN" = false ]; then
@@ -1320,6 +1625,8 @@ $go2rtc_config
 $hwaccel_config
 
 $detector_config
+
+$yolo_model_config
 
 cameras:
 $camera_template
@@ -1383,78 +1690,6 @@ setup_ssh() {
     log_success "SSH configured for user: $SSH_USER"
 }
 
-setup_samba() {
-    if [ "$ENABLE_SAMBA" != "yes" ]; then
-        log "Skipping Samba setup (disabled)"
-        return
-    fi
-    
-    log_step "Setting up Samba file sharing..."
-    
-    execute_in_container "DEBIAN_FRONTEND=noninteractive apt-get install -y samba"
-    
-    # Backup original config
-    execute_in_container "cp /etc/samba/smb.conf /etc/samba/smb.conf.bak"
-    
-    # Create Samba configuration
-    if [ "$DRY_RUN" = false ]; then
-        pct exec "$CT_ID" -- bash -c "cat > /etc/samba/smb.conf" << 'EOF'
-[global]
-netbios name = FRIGATE
-server string = Frigate NVR File Share
-workgroup = WORKGROUP
-security = user
-map to guest = Bad User
-guest account = nobody
-
-[Frigate]
-path = /opt/frigate
-comment = Frigate installation directory
-browsable = yes
-read only = no
-guest ok = yes
-public = yes
-writable = yes
-force user = root
-create mask = 0644
-directory mask = 0755
-
-[Config]
-path = /opt/frigate/config
-comment = Frigate configuration files
-browsable = yes
-read only = no
-guest ok = yes
-public = yes
-writable = yes
-force user = root
-create mask = 0644
-directory mask = 0755
-
-[Media]
-path = /opt/frigate/storage
-comment = Frigate media storage
-browsable = yes
-read only = no
-guest ok = yes
-public = yes
-writable = yes
-force user = root
-create mask = 0644
-directory mask = 0755
-EOF
-    fi
-    
-    # Set permissions
-    execute_in_container "chmod -R 777 /opt/frigate/storage"
-    
-    # Restart Samba
-    execute_in_container "systemctl restart smbd"
-    execute_in_container "systemctl enable smbd"
-    
-    log_success "Samba configured"
-}
-
 setup_extra_disk() {
     if [ "$ADD_EXTRA_DISK" != true ]; then
         return
@@ -1466,13 +1701,15 @@ setup_extra_disk() {
         # Find next mount point ID
         local mp_id=0
         while grep -q "mp$mp_id" "/etc/pve/lxc/${CT_ID}.conf"; do
-            ((mp_id++))
+            mp_id=$((mp_id + 1))
         done
         
         log "Using mount point mp$mp_id on $EXTRA_DISK_STORAGE"
-        pct set "$CT_ID" "-mp$mp_id" "$EXTRA_DISK_STORAGE:$EXTRA_DISK_SIZE,mp=/opt/frigate/storage" 2>&1 | tee -a "$LOG_FILE" || log_warn "Failed to add extra disk. Using rootfs instead."
-        
-        log_success "Extra disk added and mounted to /opt/frigate/storage"
+        if pct set "$CT_ID" "--mp${mp_id}" "${EXTRA_DISK_STORAGE}:${EXTRA_DISK_SIZE},mp=/opt/frigate/storage" 2>&1 | tee -a "$LOG_FILE"; then
+            log_success "Extra disk added and mounted to /opt/frigate/storage"
+        else
+            log_warn "Failed to add extra disk. Using rootfs instead."
+        fi
     else
         log_dry_run "Add $EXTRA_DISK_SIZE GB disk to $CT_ID on $EXTRA_DISK_STORAGE"
     fi
@@ -1491,6 +1728,133 @@ create_snapshot() {
         log_success "Snapshot created"
     else
         log_dry_run "Create snapshot $SNAPSHOT_NAME for container $CT_ID"
+    fi
+}
+
+# ============================================================================
+setup_samba() {
+    if [ "$ENABLE_SAMBA" != "yes" ]; then
+        log "Skipping Samba setup (disabled)"
+        return
+    fi
+
+    log_step "Setting up Samba file sharing..."
+
+    execute_in_container "DEBIAN_FRONTEND=noninteractive apt-get install -y samba"
+
+    # Create a dedicated non-root samba user
+    execute_in_container "id frigate &>/dev/null || useradd -M -s /usr/sbin/nologin frigate"
+    execute_in_container "chown -R frigate:frigate /opt/frigate/config /opt/frigate/storage"
+    execute_in_container "chmod -R 750 /opt/frigate/config /opt/frigate/storage"
+
+    if [ "$DRY_RUN" = false ]; then
+        pct exec "$CT_ID" -- bash -c "printf '%s\n%s\n' '$SAMBA_PASSWORD' '$SAMBA_PASSWORD' | smbpasswd -a -s frigate"
+
+        pct exec "$CT_ID" -- bash -c "cat > /etc/samba/smb.conf" << 'EOF'
+[global]
+netbios name = FRIGATE
+server string = Frigate NVR
+workgroup = WORKGROUP
+security = user
+map to guest = Never
+server min protocol = SMB2
+
+[Config]
+path = /opt/frigate/config
+comment = Frigate configuration files
+browsable = yes
+read only = no
+valid users = frigate
+force user = frigate
+create mask = 0640
+directory mask = 0750
+
+[Storage]
+path = /opt/frigate/storage
+comment = Frigate recordings and snapshots
+browsable = yes
+read only = no
+valid users = frigate
+force user = frigate
+create mask = 0640
+directory mask = 0750
+EOF
+    fi
+
+    execute_in_container "systemctl restart smbd && systemctl enable smbd"
+    log_success "Samba configured (user: frigate, shares: Config + Storage)"
+}
+
+setup_firewall() {
+    if [ "$ENABLE_FIREWALL" != "yes" ]; then
+        log "Skipping firewall setup (disabled)"
+        return
+    fi
+
+    log_step "Configuring Proxmox firewall for container $CT_ID..."
+
+    local fw_dir="/etc/pve/firewall"
+    local fw_file="$fw_dir/${CT_ID}.fw"
+
+    if [ "$DRY_RUN" = false ]; then
+        mkdir -p "$fw_dir"
+        cat > "$fw_file" << EOF
+[OPTIONS]
+enable: 1
+
+[RULES]
+IN ACCEPT -p tcp --dport $FRIGATE_PORT -log nolog # Frigate web UI
+EOF
+        log_success "Firewall enabled: port $FRIGATE_PORT (TCP) open"
+    else
+        log_dry_run "Create $fw_file and enable firewall on container"
+    fi
+}
+
+create_container_summary_dashboard() {
+    log_step "Creating Proxmox summary dashboard..."
+    
+    if [ "$DRY_RUN" = true ]; then
+        log_dry_run "Set container description to professional dashboard"
+        return
+    fi
+
+    local ip_address
+    ip_address=$(pct exec "$CT_ID" -- hostname -I | awk '{print $1}' || echo "<IP_ADDRESS>")
+    
+    local coral_line=""
+    if [ -n "$DETECTED_CORAL" ] && [ "$DETECTED_CORAL" != "none" ]; then
+        coral_line="- Coral Detector: ${DETECTED_CORAL}\n"
+    fi
+
+    # Construct Markdown Description
+    local description=$(echo -e "# Frigate Proxmox Script
+
+**Quick Access**
+| Service | URL |
+| :--- | :--- |
+| Web UI | http://${ip_address}:${FRIGATE_PORT:-5000} |
+| go2rtc API | http://${ip_address}:${GO2RTC_PORT:-1984} |
+| Frigate Auth | https://${ip_address}:${AUTH_PORT:-8971} |
+
+**Hardware Profile**
+- GPU Acceleration: ${SELECTED_GPU_TYPE:-None}
+${coral_line}- SHM Size: ${SHM_SIZE:-512mb}
+- Resources: ${CT_RAM}MB RAM / ${CT_CORES} CPU Cores
+
+**File Locations**
+- Configuration: /opt/frigate/config/config.yml
+- Media Storage: /opt/frigate/storage
+
+---
+GitHub: [saihgupr/frigate-proxmox-script](https://github.com/saihgupr/frigate-proxmox-script)
+
+Support: [Buy me a coffee](https://ko-fi.com/saihgupr)")
+
+    if pct set "$CT_ID" --description "$description" 2>/dev/null; then
+        log_success "Proxmox summary dashboard created for container $CT_ID"
+    else
+        log_warn "Failed to create Proxmox summary dashboard"
     fi
 }
 
@@ -1516,8 +1880,6 @@ main() {
     download_debian_template
     create_lxc_container
     configure_lxc_passthrough
-    configure_coral_pcie_passthrough
-    configure_coral_usb_passthrough
     setup_extra_disk
     
     start_lxc_container
@@ -1527,12 +1889,15 @@ main() {
     
     create_frigate_directories
     create_docker_compose
+    export_yolo_model
     create_frigate_config
     
     start_frigate
     
     setup_ssh
     setup_samba
+    setup_firewall
+    create_container_summary_dashboard
     
     create_snapshot
 
