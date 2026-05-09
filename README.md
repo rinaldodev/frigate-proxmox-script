@@ -5,10 +5,11 @@ A fully automated, one-command script for deploying [Frigate NVR](https://frigat
 This script builds a production-ready Frigate stack from scratch: provisioning the LXC container, installing Docker, and automatically configuring hardware acceleration.
 
 ### What it does:
-✅ **Full Stack Provisioning** - Creates an unprivileged LXC container with Docker and Compose pre-installed  
-✅ **GPU Accelerated** - Configures Intel iGPU acceleration by default (VAAPI/QSV)  
+✅ **Full Stack Provisioning** - Creates an **Unprivileged** LXC container by default (with a fallback to Privileged mode)
+✅ **GPU Accelerated** - Configures Intel iGPU acceleration automatically (VAAPI/QSV)  
 ✅ **Alder Lake-N Optimized** - Tailored for Intel N95, N100, and **N150** processors  
-✅ **Zero Manual Setup** - Handles nesting, keyctl, and minimal GPU passthrough settings
+✅ **Modern Passthrough** - Uses Proxmox 8.2+ `dev[n]` mappings for superior stability
+✅ **Zero Manual Setup** - Handles nesting, keyctl, and AppArmor profiles automatically
 
 ![](images/1.1.png)
 ![](images/2.1.png)
@@ -81,6 +82,7 @@ These options allow for automated or specialized network configurations:
 The script will prompt you for:
 
 - **Container ID** - Choose between 100-999 (or auto-select)
+- **Security Level** - Choose between **Unprivileged** (Higher security, default) or **Privileged** (Legacy hardware fallback)
 - **Root Password** - Set a password for the `root` user (required for console login)
 - **SSH** - Enable SSH access (uses Root Password automatically with `root` user)
 - **CPU Cores** - Default: 4
