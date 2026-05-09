@@ -1331,7 +1331,7 @@ start_lxc_container() {
                 break
             fi
             sleep 1
-            ((counter++))
+            counter=$((counter + 1))
         done
         
         log_success "Container $CT_ID is running"
@@ -1697,7 +1697,7 @@ setup_extra_disk() {
         # Find next mount point ID
         local mp_id=0
         while grep -q "mp$mp_id" "/etc/pve/lxc/${CT_ID}.conf"; do
-            ((mp_id++))
+            mp_id=$((mp_id + 1))
         done
         
         log "Using mount point mp$mp_id on $EXTRA_DISK_STORAGE"

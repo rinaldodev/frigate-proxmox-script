@@ -7,6 +7,7 @@
 
 ### Fixed
 - **NVIDIA Passthrough Logic**: Resolved a syntax error in the NVIDIA configuration function that could prevent script execution when using complex passthrough scenarios.
+- **Silent Script Failures**: Fixed an issue where the script would terminate unexpectedly after container startup due to bash arithmetic expressions (`((counter++))`) returning non-zero exit codes under `set -e`.
 - **Contribution Recognition**: Integrated community-driven improvements for security and hardware compatibility (Special thanks to @HarmEllis).
 
 ## [1.2.3] - 2026-05-08
