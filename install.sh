@@ -609,7 +609,7 @@ configure_container() {
         fi
         
         # Validate format (number followed by b, k, m, g)
-        if [[ ! "$input_shm" =~ ^[0-9]+[bk m g]b?$ ]]; then
+        if [[ ! "$input_shm" =~ ^[0-9]+[bkmg]b?$ ]]; then
             log_error "Invalid SHM size format! Use e.g. 512mb, 1gb, 256m"
             continue
         fi
