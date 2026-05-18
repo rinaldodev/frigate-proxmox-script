@@ -94,7 +94,59 @@ if ! pct status "$CT_ID" | grep -q "running"; then
     exit 1
 fi
 
-# Handle latest/beta keywords
+# Helper: find latest built dev tag on GHCR
+resolve_dev_version() {
+    echo "Fetching latest built dev version from GHCR..."
+    VERSION=$(python3 - <<'PYEOF'
+import urllib.request, json, sys
+
+def get_token():
+    url = "https://ghcr.io/token?service=ghcr.io&scope=repository:blakeblackshear/frigate:pull"
+    with urllib.request.urlopen(url) as r:
+        return json.loads(r.read()).get('token', '')
+
+def tag_exists(token, sha):
+    url = f"https://ghcr.io/v2/blakeblackshear/frigate/manifests/{sha}"
+    req = urllib.request.Request(url, method='HEAD')
+    req.add_header('Authorization', f'Bearer {token}')
+    req.add_header('Accept', 'application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json')
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+try:
+    commits_url = "https://api.github.com/repos/blakeblackshear/frigate/commits?sha=dev&per_page=10"
+    req = urllib.request.Request(commits_url)
+    req.add_header('User-Agent', 'Mozilla/5.0')
+    with urllib.request.urlopen(req) as r:
+        commits = json.loads(r.read())
+    shas = [c['sha'][:7] for c in commits]
+except Exception as e:
+    sys.stderr.write(f"Error fetching commits: {e}\n")
+    sys.exit(1)
+
+try:
+    token = get_token()
+except Exception as e:
+    sys.stderr.write(f"Error getting GHCR token: {e}\n")
+    sys.exit(1)
+
+for sha in shas:
+    if tag_exists(token, sha):
+        print(sha)
+        sys.exit(0)
+
+sys.stderr.write("No built dev tag found among the 10 most recent commits.\n")
+sys.exit(1)
+PYEOF
+    )
+    [ -z "$VERSION" ] && error_exit "Could not resolve a built dev image tag from GHCR."
+    echo "Resolved dev version: $VERSION"
+}
+
+# Handle latest/beta/dev keywords
 if [ "$VERSION" = "latest" ]; then
     echo "Fetching latest stable version..."
     VERSION=$(curl -s https://api.github.com/repos/blakeblackshear/frigate/releases/latest | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d '"' -f 4 | sed 's/^v//')
@@ -103,6 +155,8 @@ elif [ "$VERSION" = "beta" ]; then
     echo "Fetching latest beta version..."
     VERSION=$(curl -s https://api.github.com/repos/blakeblackshear/frigate/releases | grep -B 15 '"prerelease": true' | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d '"' -f 4 | sed 's/^v//')
     [ -z "$VERSION" ] && error_exit "Could not fetch latest beta version."
+elif [ "$VERSION" = "dev" ]; then
+    resolve_dev_version
 fi
 
 # Fetch Versions (Interactive if not provided or auto-detected)
@@ -123,7 +177,9 @@ if [ -z "$VERSION" ]; then
         for i in "${!VERSION_ARRAY[@]}"; do
             echo " $((i+1))) ${VERSION_ARRAY[$i]}"
         done
-        CUSTOM_INDEX=$(( ${#VERSION_ARRAY[@]} + 1 ))
+        DEV_INDEX=$(( ${#VERSION_ARRAY[@]} + 1 ))
+        CUSTOM_INDEX=$(( ${#VERSION_ARRAY[@]} + 2 ))
+        echo " $DEV_INDEX) dev (latest built dev branch commit)"
         echo " $CUSTOM_INDEX) Custom"
 
         while true; do
@@ -133,6 +189,9 @@ if [ -z "$VERSION" ]; then
             if [[ "$choice" -eq "$CUSTOM_INDEX" ]]; then
                 read -p "Enter custom version tag: " VERSION
                 [ -n "$VERSION" ] && break
+            elif [[ "$choice" -eq "$DEV_INDEX" ]]; then
+                resolve_dev_version
+                break
             elif [[ "$choice" -ge 1 && "$choice" -le "${#VERSION_ARRAY[@]}" ]]; then
                 VERSION="${VERSION_ARRAY[$((choice-1))]}"
                 break
