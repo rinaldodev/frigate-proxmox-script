@@ -1,3 +1,11 @@
+## [Unreleased]
+
+### Added
+- Added support for installing and updating to Frigate's latest built development branch images directly from GHCR.
+
+### Fixed
+- Switched to curl for installer network calls to improve reliability.
+
 ## [1.3.0] - 2026-05-09
 
 ### Added
