@@ -1537,6 +1537,8 @@ services:
           size: 1000000000
     ports:
       - "$FRIGATE_PORT:$FRIGATE_PORT"
+      - "$GO2RTC_PORT:$GO2RTC_PORT"
+      - "$AUTH_PORT:$AUTH_PORT"
 $device_config
     environment:
       - FRIGATE_RTSP_PASSWORD=$FRIGATE_RTSP_PASSWORD
@@ -1854,8 +1856,10 @@ enable: 1
 
 [RULES]
 IN ACCEPT -p tcp --dport $FRIGATE_PORT -log nolog # Frigate web UI
+IN ACCEPT -p tcp --dport $GO2RTC_PORT -log nolog # go2rtc API
+IN ACCEPT -p tcp --dport $AUTH_PORT -log nolog # Frigate Auth
 EOF
-        log_success "Firewall enabled: port $FRIGATE_PORT (TCP) open"
+        log_success "Firewall enabled: ports $FRIGATE_PORT, $GO2RTC_PORT, $AUTH_PORT (TCP) open"
     else
         log_dry_run "Create $fw_file and enable firewall on container"
     fi
@@ -1962,6 +1966,7 @@ main() {
     
     echo "  Frigate Web UI:  http://${ip_addr:-$CT_IP}:$FRIGATE_PORT"
     echo "  go2rtc API:      http://${ip_addr:-$CT_IP}:$GO2RTC_PORT"
+    echo "  Frigate Auth:    https://${ip_addr:-$CT_IP}:$AUTH_PORT (Requires HTTPS)"
     echo "  Container ID:    $CT_ID"
     echo ""
     

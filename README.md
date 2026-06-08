@@ -102,9 +102,9 @@ The script will prompt you for:
 <details>
 <summary><h3>Updating Existing Installations</h3></summary>
 
-If you have an existing installation and need the **go2rtc API (1984)** or **Frigate Auth (8971)** ports, you will need to add them manually to your `docker-compose.yml`:
+If you have an existing installation from an older version of the script and need the **go2rtc API (1984)** or **Frigate Auth (8971)** ports, you will need to add them manually to your `compose.yml` (new installations automatically map these ports):
 
-1.  Edit the file: `pct exec <CT_ID> -- nano /opt/frigate/docker-compose.yml`
+1.  Edit the file: `pct exec <CT_ID> -- nano /opt/frigate/compose.yml`
 2.  Add the ports under the `ports:` section:
     ```yaml
           - "1984:1984"  # go2rtc API
@@ -112,7 +112,7 @@ If you have an existing installation and need the **go2rtc API (1984)** or **Fri
     ```
 3.  Recreate the container:
     ```bash
-    pct exec <CT_ID> -- docker compose -f /opt/frigate/docker-compose.yml up -d
+    pct exec <CT_ID> -- docker compose -f /opt/frigate/compose.yml up -d
     ```
 
 </details>
@@ -137,7 +137,7 @@ scp config.yml root@<PROXMOX_IP>:/tmp/
 pct push <CT_ID> /tmp/config.yml /opt/frigate/config/config.yml
 
 # Restart Frigate to apply changes
-pct exec <CT_ID> -- docker compose -f /opt/frigate/docker-compose.yml restart
+pct exec <CT_ID> -- docker compose -f /opt/frigate/compose.yml restart
 ```
 
 #### Method 3: Use Frigate Web UI (Recommended)
@@ -163,7 +163,7 @@ If you enabled Samba during installation:
 
 ```
 /opt/frigate/
-├── docker-compose.yml      # Docker Compose configuration
+├── compose.yml             # Docker Compose configuration
 ├── config/
 │   └── config.yml         # Frigate configuration
 └── storage/               # Recordings and snapshots
@@ -261,8 +261,8 @@ pct exec <CT_ID> -- docker ps
 # Check Frigate logs
 pct exec <CT_ID> -- docker logs frigate
 
-# Verify port in docker-compose.yml
-pct exec <CT_ID> -- cat /opt/frigate/docker-compose.yml | grep -A2 ports
+# Verify port in compose.yml
+pct exec <CT_ID> -- cat /opt/frigate/compose.yml | grep -A2 ports
 ```
 
 ### Hardware acceleration not working
@@ -357,15 +357,15 @@ bash <(wget -qO- https://raw.githubusercontent.com/saihgupr/frigate-proxmox-scri
 
 1. Edit your compose file. Replace `<CT_ID>` with your container ID (e.g., 100).
    ```bash
-   pct exec <CT_ID> -- nano /opt/frigate/docker-compose.yml
+   pct exec <CT_ID> -- nano /opt/frigate/compose.yml
    ```
 2. Change the image line to the desired version, e.g.:
    `image: ghcr.io/blakeblackshear/frigate:0.17.0-rc1`
 
 3. Pull the new image and recreate the container:
    ```bash
-   pct exec <CT_ID> -- docker compose -f /opt/frigate/docker-compose.yml pull
-   pct exec <CT_ID> -- docker compose -f /opt/frigate/docker-compose.yml up -d
+   pct exec <CT_ID> -- docker compose -f /opt/frigate/compose.yml pull
+   pct exec <CT_ID> -- docker compose -f /opt/frigate/compose.yml up -d
    ```
 
 4. Verify:
