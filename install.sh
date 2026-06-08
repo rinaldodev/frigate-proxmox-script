@@ -62,7 +62,7 @@ SHM_SIZE="256mb"
 ENABLE_SSH="no"
 SSH_USER="root"
 SSH_PASSWORD=""
-ENABLE_FIREWALL="yes"
+ENABLE_FIREWALL="no"
 ENABLE_SAMBA="no"
 SAMBA_PASSWORD=""
 ROOT_PASSWORD=""
@@ -1909,9 +1909,7 @@ show_help() {
     echo "    -b, --bridge NAME      Specify the network bridge (default: vmbr0)"
     echo "    --vlan TAG             Specify a VLAN tag for the container network (1-4094)"
     echo "    --mtu MTU              Specify an MTU for the container network (576-9000)"
-    echo "    --firewall             Enable Proxmox firewall on container (default)"
-    echo "    --no-firewall          Disable Proxmox firewall on container"
-    echo "    --disable-firewall     Disable Proxmox firewall on container"
+    echo "    --firewall             Enable Proxmox firewall on container"
 }
 
 main() {

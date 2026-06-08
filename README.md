@@ -75,7 +75,7 @@ These options allow for automated or specialized network configurations:
 | `-b`, `--bridge NAME` | Specify the network bridge (default: `vmbr0`) |
 | `--vlan TAG`          | Specify a VLAN tag for the container network (1-4094) |
 | `--mtu MTU`           | Specify an MTU for the container network (576-9000) |
-| `--no-firewall`       | Disable Proxmox firewall on the container |
+| `--firewall`          | Enable Proxmox firewall on the container |
 ```
 
 <details>

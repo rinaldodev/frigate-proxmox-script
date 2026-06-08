@@ -4,7 +4,8 @@
 - Added support for installing and updating to Frigate's latest built development branch images directly from GHCR.
 
 ### Changed
-- Converted VLAN, MTU, and Proxmox firewall configuration from interactive onboarding prompts to command-line flag options (`--vlan`, `--mtu`, and `--no-firewall`/`--disable-firewall`), streamlining the default setup flow.
+- Converted VLAN, MTU, and Proxmox firewall configuration from interactive onboarding prompts to command-line flag options (`--vlan`, `--mtu`, and `--firewall`), streamlining the default setup flow.
+- Set the Proxmox container firewall to default off, using the `--firewall` flag to enable it.
 
 ### Fixed
 - Switched to curl for installer network calls to improve reliability.
