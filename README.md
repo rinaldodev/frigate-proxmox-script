@@ -65,6 +65,7 @@ OPTIONS:
     -d, --dry-run          Run in simulation mode (no actual changes)
     -v, --verbose          Enable verbose output
     -h, --help             Show help message
+```
 
 ### Advanced Options
 
@@ -76,7 +77,6 @@ These options allow for automated or specialized network configurations:
 | `--vlan TAG`          | Specify a VLAN tag for the container network (1-4094) |
 | `--mtu MTU`           | Specify an MTU for the container network (576-9000) |
 | `--firewall`          | Enable Proxmox firewall on the container |
-```
 
 <details>
 <summary><h2>Configuration Options</h2></summary>
