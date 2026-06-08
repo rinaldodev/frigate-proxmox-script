@@ -62,9 +62,9 @@ bash install.sh
 ./install.sh [OPTIONS]
 
 OPTIONS:
-    --dry-run       Run in simulation mode (no actual changes)
-    --verbose       Enable verbose output
-    --help          Show help message
+    -d, --dry-run          Run in simulation mode (no actual changes)
+    -v, --verbose          Enable verbose output
+    -h, --help             Show help message
 
 ### Advanced Options
 
@@ -72,8 +72,10 @@ These options allow for automated or specialized network configurations:
 
 | Flag | Description |
 | :--- | :--- |
-| `--bridge NAME` | Specify the network bridge (default: `vmbr0`) |
-| `--vlan TAG` | Specify a VLAN tag for the container network |
+| `-b`, `--bridge NAME` | Specify the network bridge (default: `vmbr0`) |
+| `--vlan TAG`          | Specify a VLAN tag for the container network (1-4094) |
+| `--mtu MTU`           | Specify an MTU for the container network (576-9000) |
+| `--no-firewall`       | Disable Proxmox firewall on the container |
 ```
 
 <details>

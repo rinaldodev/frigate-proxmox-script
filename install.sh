@@ -43,6 +43,7 @@ CT_STORAGE=""
 CT_VLAN=""
 CT_MTU=""
 CT_BRIDGE="vmbr0"
+CT_BRIDGE_FLAG=""
 CT_NETWORK_TYPE="dhcp"
 CT_IP=""
 CT_GATEWAY=""
@@ -520,30 +521,35 @@ configure_container() {
     echo ""
     echo "Network Configuration:"
 
-    # Detect available Linux bridges
-    local available_bridges
-    mapfile -t available_bridges < <(ip link show type bridge 2>/dev/null | awk -F': ' '/^[0-9]+:/{print $2}' | sed 's/@.*//' | grep '^vmbr')
-    if [ ${#available_bridges[@]} -eq 0 ]; then
-        read -p "Enter network bridge (e.g., vmbr0): " input_bridge
-        CT_BRIDGE="${input_bridge:-vmbr0}"
-    elif [ ${#available_bridges[@]} -eq 1 ]; then
-        CT_BRIDGE="${available_bridges[0]}"
-        echo "  Network Bridge:  $CT_BRIDGE (auto-detected)"
+    if [ -n "$CT_BRIDGE_FLAG" ]; then
+        CT_BRIDGE="$CT_BRIDGE_FLAG"
+        echo "  Network Bridge:  $CT_BRIDGE (specified via flag)"
     else
-        echo "  Available bridges:"
-        for i in "${!available_bridges[@]}"; do
-            echo "    $((i+1))) ${available_bridges[$i]}"
-        done
-        while true; do
-            read -p "Select network bridge [1-${#available_bridges[@]}] (default: 1): " bridge_choice
-            bridge_choice=${bridge_choice:-1}
-            if [[ "$bridge_choice" =~ ^[0-9]+$ ]] && [ "$bridge_choice" -ge 1 ] && [ "$bridge_choice" -le "${#available_bridges[@]}" ]; then
-                CT_BRIDGE="${available_bridges[$((bridge_choice-1))]}"
-                break
-            else
-                log_error "Invalid selection."
-            fi
-        done
+        # Detect available Linux bridges
+        local available_bridges
+        mapfile -t available_bridges < <(ip link show type bridge 2>/dev/null | awk -F': ' '/^[0-9]+:/{print $2}' | sed 's/@.*//' | grep '^vmbr')
+        if [ ${#available_bridges[@]} -eq 0 ]; then
+            read -p "Enter network bridge (e.g., vmbr0): " input_bridge
+            CT_BRIDGE="${input_bridge:-vmbr0}"
+        elif [ ${#available_bridges[@]} -eq 1 ]; then
+            CT_BRIDGE="${available_bridges[0]}"
+            echo "  Network Bridge:  $CT_BRIDGE (auto-detected)"
+        else
+            echo "  Available bridges:"
+            for i in "${!available_bridges[@]}"; do
+                echo "    $((i+1))) ${available_bridges[$i]}"
+            done
+            while true; do
+                read -p "Select network bridge [1-${#available_bridges[@]}] (default: 1): " bridge_choice
+                bridge_choice=${bridge_choice:-1}
+                if [[ "$bridge_choice" =~ ^[0-9]+$ ]] && [ "$bridge_choice" -ge 1 ] && [ "$bridge_choice" -le "${#available_bridges[@]}" ]; then
+                    CT_BRIDGE="${available_bridges[$((bridge_choice-1))]}"
+                    break
+                else
+                    log_error "Invalid selection."
+                fi
+            done
+        fi
     fi
 
     echo "  1) DHCP (automatic)"
@@ -560,23 +566,7 @@ configure_container() {
         CT_NETWORK_TYPE="dhcp"
     fi
 
-    read -p "Enter VLAN tag (optional, press Enter to skip): " input_vlan
-    if [ -n "$input_vlan" ]; then
-        if [[ "$input_vlan" =~ ^[0-9]+$ ]] && [ "$input_vlan" -ge 1 ] && [ "$input_vlan" -le 4094 ]; then
-            CT_VLAN="$input_vlan"
-        else
-            log_warn "Invalid VLAN tag '$input_vlan' (must be 1-4094). Skipping."
-        fi
-    fi
 
-    read -p "Enter MTU (optional, press Enter for default): " input_mtu
-    if [ -n "$input_mtu" ]; then
-        if [[ "$input_mtu" =~ ^[0-9]+$ ]] && [ "$input_mtu" -ge 576 ] && [ "$input_mtu" -le 9000 ]; then
-            CT_MTU="$input_mtu"
-        else
-            log_warn "Invalid MTU '$input_mtu' (must be 576-9000). Skipping."
-        fi
-    fi
     
     echo ""
     if [ ${#GPU_TYPES_FOUND[@]} -gt 1 ]; then
@@ -924,15 +914,6 @@ configure_container() {
                 log_error "Passwords do not match! Please try again."
             fi
         done
-    fi
-
-    echo ""
-    read -p "Enable Proxmox firewall on container (opens port $FRIGATE_PORT)? (Y/n): " enable_fw
-    enable_fw=${enable_fw:-Y}
-    if [[ "$enable_fw" =~ ^[Yy]$ ]]; then
-        ENABLE_FIREWALL="yes"
-    else
-        ENABLE_FIREWALL="no"
     fi
 
     echo ""
@@ -1916,7 +1897,89 @@ Support: [Buy me a coffee](https://ko-fi.com/saihgupr)")
 # MAIN EXECUTION
 # ============================================================================
 
+show_help() {
+    echo "Usage: ./install.sh [OPTIONS]"
+    echo ""
+    echo "OPTIONS:"
+    echo "    -d, --dry-run          Run in simulation mode (no actual changes)"
+    echo "    -v, --verbose          Enable verbose output"
+    echo "    -h, --help             Show help message"
+    echo ""
+    echo "ADVANCED OPTIONS:"
+    echo "    -b, --bridge NAME      Specify the network bridge (default: vmbr0)"
+    echo "    --vlan TAG             Specify a VLAN tag for the container network (1-4094)"
+    echo "    --mtu MTU              Specify an MTU for the container network (576-9000)"
+    echo "    --firewall             Enable Proxmox firewall on container (default)"
+    echo "    --no-firewall          Disable Proxmox firewall on container"
+    echo "    --disable-firewall     Disable Proxmox firewall on container"
+}
+
 main() {
+    # Parse command line options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -d|--dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -b|--bridge)
+                if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
+                    log_error "Error: --bridge requires a value"
+                    exit 1
+                fi
+                CT_BRIDGE_FLAG="$2"
+                shift 2
+                ;;
+            --vlan)
+                if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
+                    log_error "Error: --vlan requires a value"
+                    exit 1
+                fi
+                if [[ "$2" =~ ^[0-9]+$ ]] && [ "$2" -ge 1 ] && [ "$2" -le 4094 ]; then
+                    CT_VLAN="$2"
+                else
+                    log_error "Error: Invalid VLAN tag '$2' (must be 1-4094)"
+                    exit 1
+                fi
+                shift 2
+                ;;
+            --mtu)
+                if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
+                    log_error "Error: --mtu requires a value"
+                    exit 1
+                fi
+                if [[ "$2" =~ ^[0-9]+$ ]] && [ "$2" -ge 576 ] && [ "$2" -le 9000 ]; then
+                    CT_MTU="$2"
+                else
+                    log_error "Error: Invalid MTU '$2' (must be 576-9000)"
+                    exit 1
+                fi
+                shift 2
+                ;;
+            --firewall)
+                ENABLE_FIREWALL="yes"
+                shift
+                ;;
+            --no-firewall|--disable-firewall)
+                ENABLE_FIREWALL="no"
+                shift
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+
     echo -e "${BLUE}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  FRIGATE NVR DOCKER INSTALLER FOR PROXMOX"
