@@ -11,6 +11,7 @@
 - Switched to curl for installer network calls to improve reliability.
 - Expose go2rtc API (1984) and Frigate Auth (8971) ports by default in the generated `compose.yml` and Proxmox firewall rules.
 - Standardized documentation and command references to use `compose.yml` instead of the legacy `docker-compose.yml`.
+- Improved automatic GPU render node selection by resolving to the first detected render node on the host when only a single node is present.
 
 ## [1.3.0] - 2026-05-09
 

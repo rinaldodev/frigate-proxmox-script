@@ -364,6 +364,9 @@ check_hardware() {
     # 2. Device Node Detection (Driver status)
     if [ -d "/dev/dri" ]; then
         DETECTED_RENDER_NODES=($(ls /dev/dri/renderD* 2>/dev/null || true))
+        if [ ${#DETECTED_RENDER_NODES[@]} -gt 0 ]; then
+            SELECTED_RENDER_NODE="${DETECTED_RENDER_NODES[0]}"
+        fi
     fi
 
     # 3. Logic for selection and warnings
