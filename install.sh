@@ -765,8 +765,8 @@ configure_container() {
     
     echo ""
 
-    # YOLOv9 model (only for OpenVINO-capable GPUs)
-    if [ "$SELECTED_GPU_TYPE" = "intel" ] || [ "$SELECTED_GPU_TYPE" = "amd" ] || [ "$SELECTED_GPU_TYPE" = "vaapi" ]; then
+    # YOLOv9 model (only for OpenVINO-capable GPUs and when no Coral is present)
+    if [ "$DETECTED_CORAL" = "none" ] && { [ "$SELECTED_GPU_TYPE" = "intel" ] || [ "$SELECTED_GPU_TYPE" = "amd" ] || [ "$SELECTED_GPU_TYPE" = "vaapi" ]; }; then
         echo ""
         echo -n "Use custom YOLOv9 model (OpenVINO)? More accurate than default SSD. (y/N): "
         read -r yolo_choice
@@ -1643,7 +1643,7 @@ create_frigate_config() {
   input_dtype: float
   path: $YOLO_MODEL_PATH
   labelmap_path: /labelmap/coco-80.txt"
-    elif [ "$SELECTED_GPU_TYPE" = "intel" ] || [ "$SELECTED_GPU_TYPE" = "amd" ] || [ "$SELECTED_GPU_TYPE" = "vaapi" ]; then
+    elif [ "$DETECTED_CORAL" = "none" ] && { [ "$SELECTED_GPU_TYPE" = "intel" ] || [ "$SELECTED_GPU_TYPE" = "amd" ] || [ "$SELECTED_GPU_TYPE" = "vaapi" ]; }; then
         # Frigate 0.17+ defaults to 320x320 tensor input; SSD MobileNet requires explicit 300x300
         yolo_model_config="model:
   width: 300
