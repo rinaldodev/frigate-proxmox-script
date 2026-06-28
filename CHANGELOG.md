@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [1.4.0] - 2026-06-28
+
 ### Added
 - Added support for installing and updating to Frigate's latest built development branch images directly from GHCR.
 - Added documentation and troubleshooting workarounds for Intel QSV "Can't allocate a surface" hardware acceleration errors on newer Intel CPUs.
