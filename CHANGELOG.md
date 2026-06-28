@@ -12,6 +12,7 @@
 - Switched to curl for installer network calls to improve reliability.
 - Expose go2rtc API (1984) and Frigate Auth (8971) ports by default in the generated `compose.yml` and Proxmox firewall rules.
 - Standardized documentation and command references to use `compose.yml` instead of the legacy `docker-compose.yml`.
+- Added automatic migration of legacy `docker-compose.yml` to `compose.yml` in the update script to prevent update failures on older installations.
 - Improved automatic GPU render node selection by resolving to the first detected render node on the host when only a single node is present.
 - Resolved an EdgeTPU crash by ensuring the OpenVINO model configuration is not generated when a Google Coral TPU is detected.
 - Resolved permission denied issues on the system 'lost+found' directory in Samba share setup when using a separate recordings disk.

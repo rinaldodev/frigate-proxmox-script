@@ -255,6 +255,16 @@ fi
 
 check_container_space
 
+# Migrate legacy docker-compose.yml to compose.yml if needed
+if pct exec "$CT_ID" -- bash -c '[ -f /opt/frigate/docker-compose.yml ] && [ ! -f /opt/frigate/compose.yml ]'; then
+    log_info "Legacy docker-compose.yml detected. Migrating to compose.yml..."
+    pct exec "$CT_ID" -- mv /opt/frigate/docker-compose.yml /opt/frigate/compose.yml
+fi
+
+if ! pct exec "$CT_ID" -- bash -c '[ -f /opt/frigate/compose.yml ]'; then
+    error_exit "Could not find compose.yml in /opt/frigate/ inside container $CT_ID."
+fi
+
 echo "Updating container $CT_ID to version $VERSION..."
 
 # update docker-compose.yml inside the container using sed
