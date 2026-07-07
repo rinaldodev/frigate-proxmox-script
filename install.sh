@@ -75,8 +75,15 @@ DETECTED_CPU=""
 DETECTED_GPU="none"
 GPU_TYPES_FOUND=() # Array to store all found GPU types (intel, amd, nvidia)
 SELECTED_GPU_TYPE="none"
+SELECTED_RENDER_NODES=()
+ENABLE_NVIDIA_PASSTHROUGH=false
+SELECTED_NVIDIA_INDEXES=()
 DETECTED_RENDER_NODES=() # Array to store found render nodes
-SELECTED_RENDER_NODE="/dev/dri/renderD128"
+GPU_SLOTS=()
+GPU_DESCS=()
+GPU_VENDORS=()
+GPU_DRI_NODES=()
+GPU_NVIDIA_IDS=()
 DETECTED_CORAL="none"
 GPU_PRESET="preset-vaapi" # Default to VAAPI (Intel/AMD)
 ENABLE_YOLO_MODEL=false
@@ -347,72 +354,115 @@ check_hardware() {
     GPU_TYPES_FOUND=()
     DETECTED_RENDER_NODES=()
     
-    # 1. PCI Hardware Detection (Physical presence)
+    GPU_SLOTS=()
+    GPU_DESCS=()
+    GPU_VENDORS=()
+    GPU_DRI_NODES=()
+    GPU_NVIDIA_IDS=()
+
+    # Get all PCI graphics controllers (VGA/3D/Display class 03xx)
     local pci_output
     pci_output=$(lspci -nn 2>/dev/null || true)
     
-    if echo "$pci_output" | grep -qi "intel"; then
-        GPU_TYPES_FOUND+=("intel")
-    fi
-    if echo "$pci_output" | grep -qi "amd"; then
-        GPU_TYPES_FOUND+=("amd")
-    fi
-    if echo "$pci_output" | grep -qi "nvidia"; then
-        GPU_TYPES_FOUND+=("nvidia")
-    fi
-
-    # 2. Device Node Detection (Driver status)
-    if [ -d "/dev/dri" ]; then
-        DETECTED_RENDER_NODES=($(ls /dev/dri/renderD* 2>/dev/null || true))
-        if [ ${#DETECTED_RENDER_NODES[@]} -gt 0 ]; then
-            SELECTED_RENDER_NODE="${DETECTED_RENDER_NODES[0]}"
+    # Filter to match Display/VGA/3D controllers: Class 0300, 0301, 0302, 0380
+    local pci_gpus
+    pci_gpus=$(echo "$pci_output" | grep -E "\[03(00|01|02|80)\]" || true)
+    
+    local nvidia_counter=0
+    
+    # Parse slot, description, and vendors
+    while read -r line; do
+        [ -z "$line" ] && continue
+        local slot=$(echo "$line" | awk '{print $1}')
+        local desc=$(echo "$line" | cut -d: -f3- | sed -E 's/\s+\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\].*//' | xargs)
+        local vendor="unknown"
+        
+        if echo "$line" | grep -qE "\[10de:"; then
+            vendor="nvidia"
+        elif echo "$line" | grep -qE "\[8086:"; then
+            vendor="intel"
+        elif echo "$line" | grep -qE "\[1002:|\[100b:"; then
+            vendor="amd"
         fi
-    fi
+        
+        local dri_node="none"
+        if [[ "$vendor" == "intel" || "$vendor" == "amd" ]]; then
+            # Find matching DRI node by checking sysfs
+            for node in /dev/dri/renderD*; do
+                [ ! -e "$node" ] && continue
+                local node_slot=$(basename "$(readlink -f "/sys/class/drm/$(basename "$node")/device" 2>/dev/null || echo "")")
+                # Strip domain e.g. 0000:01:00.0 -> 01:00.0
+                node_slot=${node_slot#0000:}
+                if [ "$node_slot" = "$slot" ]; then
+                    dri_node="$node"
+                    break
+                fi
+            done
+        fi
+        
+        local nv_id="none"
+        if [ "$vendor" = "nvidia" ]; then
+            nv_id="$nvidia_counter"
+            nvidia_counter=$((nvidia_counter + 1))
+        fi
+        
+        GPU_SLOTS+=("$slot")
+        GPU_DESCS+=("$desc")
+        GPU_VENDORS+=("$vendor")
+        GPU_DRI_NODES+=("$dri_node")
+        GPU_NVIDIA_IDS+=("$nv_id")
+        
+        # Populate GPU_TYPES_FOUND for summary / default selections
+        if [[ " ${GPU_TYPES_FOUND[*]} " != *" $vendor "* ]]; then
+            GPU_TYPES_FOUND+=("$vendor")
+        fi
+        
+        # Log detected GPU
+        local display_info="$desc ($slot)"
+        if [ "$dri_node" != "none" ]; then
+            display_info="$desc ($slot) ($(basename "$dri_node"))"
+            DETECTED_RENDER_NODES+=("$dri_node")
+        elif [ "$nv_id" != "none" ]; then
+            display_info="$desc ($slot) (NVIDIA GPU $nv_id)"
+        fi
+        log "Found Graphics Device: $display_info"
+    done <<< "$pci_gpus"
 
-    # 3. Logic for selection and warnings
-    if [ ${#GPU_TYPES_FOUND[@]} -eq 0 ] && [ ${#DETECTED_RENDER_NODES[@]} -gt 0 ]; then
-        # Render nodes exist but didn't match intel/amd/nvidia - likely generic VAAPI
-        GPU_TYPES_FOUND+=("vaapi")
-    fi
-
-    # Check for NVIDIA tools if hardware found
+    # Verify if NVIDIA drivers are loaded
     if [[ " ${GPU_TYPES_FOUND[*]} " == *" nvidia "* ]]; then
         if ! command -v nvidia-smi &>/dev/null; then
             log_warn "NVIDIA GPU hardware detected, but 'nvidia-smi' not found on host!"
             log_warn "Ensure the NVIDIA driver is installed on Proxmox host for passthrough to work."
         fi
     fi
-    
-    # Set initial DETECTED_GPU based on priority
+
+    # Simplify DETECTED_GPU description for console/logs
     if [ ${#GPU_TYPES_FOUND[@]} -eq 1 ]; then
         SELECTED_GPU_TYPE="${GPU_TYPES_FOUND[0]}"
         case "$SELECTED_GPU_TYPE" in
-            intel) DETECTED_GPU="Intel iGPU"; GPU_PRESET="preset-vaapi" ;;
-            amd) DETECTED_GPU="AMD GPU"; GPU_PRESET="preset-vaapi" ;;
-            nvidia) DETECTED_GPU="NVIDIA GPU"; GPU_PRESET="preset-nvidia" ;;
-            vaapi) DETECTED_GPU="Generic VAAPI"; GPU_PRESET="preset-vaapi" ;;
+            intel) DETECTED_GPU="Intel iGPU" ;;
+            amd) DETECTED_GPU="AMD GPU" ;;
+            nvidia) DETECTED_GPU="NVIDIA GPU" ;;
         esac
     elif [ ${#GPU_TYPES_FOUND[@]} -gt 1 ]; then
+        local IFS=", "
         DETECTED_GPU="Multiple (${GPU_TYPES_FOUND[*]})"
-        # We'll let the user select later
-    fi
-    
-    # Verify driver existence on host for Intel/AMD/VAAPI
-    if [[ "$SELECTED_GPU_TYPE" == "intel" || "$SELECTED_GPU_TYPE" == "amd" || "$SELECTED_GPU_TYPE" == "vaapi" ]]; then
-        if [ ${#DETECTED_RENDER_NODES[@]} -eq 0 ]; then
-            log_warn "GPU detected via lspci but no render nodes found in /dev/dri/!"
-            log_warn "This usually means the host drivers are not loaded."
-            log_warn "Try: apt-get install -y intel-media-va-driver-non-free (for Intel)"
+        unset IFS
+    else
+        if [ ${#DETECTED_RENDER_NODES[@]} -gt 0 ]; then
+            DETECTED_GPU="Generic VAAPI"
+            SELECTED_GPU_TYPE="vaapi"
+        else
             DETECTED_GPU="none"
             SELECTED_GPU_TYPE="none"
         fi
     fi
-    
-    if [ "$DETECTED_GPU" != "none" ]; then
-        log_success "Detected GPU: $DETECTED_GPU"
-        if [ ${#DETECTED_RENDER_NODES[@]} -gt 1 ]; then
-            log "Found ${#DETECTED_RENDER_NODES[@]} render nodes: ${DETECTED_RENDER_NODES[*]}"
+
+    if [ "$DETECTED_GPU" != "none" ] || [ ${#DETECTED_RENDER_NODES[@]} -gt 0 ]; then
+        if [ "$DETECTED_GPU" = "none" ]; then
+            DETECTED_GPU="Generic DRI/DRM Device"
         fi
+        log_success "Detected GPUs: $DETECTED_GPU"
     else
         log_warn "No integrated or dedicated GPU detected for hardware acceleration."
         GPU_PRESET="none"
@@ -572,68 +622,102 @@ configure_container() {
 
     
     echo ""
-    if [ ${#GPU_TYPES_FOUND[@]} -gt 1 ]; then
-        log_step "Multiple GPUs detected. Select which one to use for Frigate:"
-        options=()
-        for type in "${GPU_TYPES_FOUND[@]}"; do
-            case "$type" in
-                intel) options+=("Intel iGPU (VAAPI)") ;;
-                amd) options+=("AMD GPU (VAAPI)") ;;
-                nvidia) options+=("NVIDIA GPU (NVDEC/NVENC)") ;;
-                vaapi) options+=("Generic VAAPI") ;;
-            esac
-        done
-        options+=("None (CPU only)")
-        
-        select opt in "${options[@]}"; do
-            case "$opt" in
-                "Intel iGPU (VAAPI)") SELECTED_GPU_TYPE="intel"; DETECTED_GPU="Intel iGPU"; GPU_PRESET="preset-vaapi"; ENABLE_IGPU="yes"; break ;;
-                "AMD GPU (VAAPI)") SELECTED_GPU_TYPE="amd"; DETECTED_GPU="AMD GPU"; GPU_PRESET="preset-vaapi"; ENABLE_IGPU="yes"; break ;;
-                "NVIDIA GPU (NVDEC/NVENC)") SELECTED_GPU_TYPE="nvidia"; DETECTED_GPU="NVIDIA GPU"; GPU_PRESET="preset-nvidia"; ENABLE_IGPU="yes"; break ;;
-                "Generic VAAPI") SELECTED_GPU_TYPE="vaapi"; DETECTED_GPU="Generic VAAPI"; GPU_PRESET="preset-vaapi"; ENABLE_IGPU="yes"; break ;;
-                "None (CPU only)") SELECTED_GPU_TYPE="none"; DETECTED_GPU="none"; ENABLE_IGPU="no"; GPU_PRESET="none"; break ;;
-                *) log_error "Invalid selection" ;;
-            esac
-        done
-    elif [ "$DETECTED_GPU" != "none" ]; then
-        read -p "Enable hardware acceleration using $DETECTED_GPU? (Y/n): " enable_hwaccel
-        if [[ "$enable_hwaccel" =~ ^[Nn]$ ]]; then
-            ENABLE_IGPU="no"
-            SELECTED_GPU_TYPE="none"
-            GPU_PRESET="none"
-        else
-            ENABLE_IGPU="yes"
-        fi
-    else
+    SELECTED_RENDER_NODES=()
+    SELECTED_NVIDIA_INDEXES=()
+    
+    # Prompt for each GPU individually
+    if [ ${#GPU_SLOTS[@]} -gt 0 ]; then
         echo ""
-        log_warn "Integrated GPU (iGPU) not detected for hardware-accelerated video decoding."
-        if [ "$DETECTED_CORAL" != "none" ]; then
-            log "Note: Google Coral ($DETECTED_CORAL) WAS detected and will be used for high-speed object detection."
-            log "However, video streams will be decoded using the CPU, which may increase load."
-        else
-            log "If you have an Intel CPU with iGPU, ensure 'HEVC' or 'iGPU' is enabled in BIOS and drivers are installed on the host."
-        fi
-        ENABLE_IGPU="no"
-    fi
-
-    # Handle multiple render nodes (SR-IOV)
-    if [ "$ENABLE_IGPU" = "yes" ] && [ ${#DETECTED_RENDER_NODES[@]} -gt 1 ]; then
-        echo ""
-        log_step "Multiple render nodes found (Possible SR-IOV). Select which one to use:"
-        options=()
-        for node in "${DETECTED_RENDER_NODES[@]}"; do
-            options+=("$node")
-        done
-        
-        select opt in "${options[@]}"; do
-            if [ -n "$opt" ]; then
-                SELECTED_RENDER_NODE="$opt"
-                log "Selected render node: $SELECTED_RENDER_NODE"
-                break
+        log_step "Configuring GPU Passthrough Options..."
+        for i in "${!GPU_SLOTS[@]}"; do
+            local slot="${GPU_SLOTS[$i]}"
+            local desc="${GPU_DESCS[$i]}"
+            local vendor="${GPU_VENDORS[$i]}"
+            local dri_node="${GPU_DRI_NODES[$i]}"
+            local nv_id="${GPU_NVIDIA_IDS[$i]}"
+            
+            local display_name="$desc ($slot)"
+            if [ "$dri_node" != "none" ]; then
+                display_name="$desc ($slot) ($(basename "$dri_node"))"
+            elif [ "$nv_id" != "none" ]; then
+                display_name="$desc ($slot) (NVIDIA GPU $nv_id)"
+            fi
+            
+            read -p "Enable passthrough for $display_name? (Y/n): " choice
+            choice=${choice:-Y}
+            if [[ "$choice" =~ ^[Yy]$ ]]; then
+                if [ "$dri_node" != "none" ]; then
+                    SELECTED_RENDER_NODES+=("$dri_node")
+                    log "  Enabled: $display_name"
+                elif [ "$nv_id" != "none" ]; then
+                    SELECTED_NVIDIA_INDEXES+=("$nv_id")
+                    log "  Enabled: $display_name"
+                fi
             else
-                log_error "Invalid selection"
+                log "  Disabled: $display_name"
             fi
         done
+    fi
+    
+    ENABLE_NVIDIA_PASSTHROUGH=false
+    if [ ${#SELECTED_NVIDIA_INDEXES[@]} -gt 0 ]; then
+        ENABLE_NVIDIA_PASSTHROUGH=true
+    fi
+
+    # 3. Resolve acceleration variables and default ffmpeg preset
+    local total_dri=${#SELECTED_RENDER_NODES[@]}
+    
+    if [ $total_dri -gt 0 ] || [ "$ENABLE_NVIDIA_PASSTHROUGH" = true ]; then
+        ENABLE_IGPU="yes"
+        
+        # Build description of enabled GPUs
+        local enabled_desc_list=()
+        if [ $total_dri -gt 0 ]; then
+            enabled_desc_list+=("$total_dri DRI Device(s)")
+        fi
+        if [ "$ENABLE_NVIDIA_PASSTHROUGH" = true ]; then
+            enabled_desc_list+=("NVIDIA GPU")
+        fi
+        
+        # Convert array to string
+        local IFS=", "
+        DETECTED_GPU="${enabled_desc_list[*]}"
+        unset IFS
+        
+        # Determine ffmpeg decode preset
+        if [ $total_dri -gt 0 ] && [ "$ENABLE_NVIDIA_PASSTHROUGH" = true ]; then
+            echo ""
+            echo "Multiple GPU families (DRI/VAAPI and NVIDIA) are enabled."
+            echo "Which GPU family should be used as the default for ffmpeg decoding?"
+            echo "  1) VAAPI (Intel/AMD) [Recommended]"
+            echo "  2) NVIDIA (NVDEC)"
+            while true; do
+                read -p "Selection [1-2] (default: 1): " ffmpeg_gpu_choice
+                ffmpeg_gpu_choice=${ffmpeg_gpu_choice:-1}
+                if [ "$ffmpeg_gpu_choice" = "1" ]; then
+                    SELECTED_GPU_TYPE="vaapi"
+                    GPU_PRESET="preset-vaapi"
+                    break
+                elif [ "$ffmpeg_gpu_choice" = "2" ]; then
+                    SELECTED_GPU_TYPE="nvidia"
+                    GPU_PRESET="preset-nvidia"
+                    break
+                else
+                    log_error "Invalid selection."
+                fi
+            done
+        elif [ $total_dri -gt 0 ]; then
+            SELECTED_GPU_TYPE="vaapi"
+            GPU_PRESET="preset-vaapi"
+        else
+            SELECTED_GPU_TYPE="nvidia"
+            GPU_PRESET="preset-nvidia"
+        fi
+    else
+        ENABLE_IGPU="no"
+        SELECTED_GPU_TYPE="none"
+        GPU_PRESET="none"
+        DETECTED_GPU="none"
     fi
     
     echo ""
@@ -766,7 +850,7 @@ configure_container() {
     echo ""
 
     # YOLOv9 model (only for OpenVINO-capable GPUs and when no Coral is present)
-    if [ "$DETECTED_CORAL" = "none" ] && { [ "$SELECTED_GPU_TYPE" = "intel" ] || [ "$SELECTED_GPU_TYPE" = "amd" ] || [ "$SELECTED_GPU_TYPE" = "vaapi" ]; }; then
+    if [ "$DETECTED_CORAL" = "none" ] && [ ${#SELECTED_RENDER_NODES[@]} -gt 0 ]; then
         echo ""
         echo -n "Use custom YOLOv9 model (OpenVINO)? More accurate than default SSD. (y/N): "
         read -r yolo_choice
@@ -964,8 +1048,11 @@ show_configuration_summary() {
     echo "Frigate Settings:"
     echo "  Docker Image:    ghcr.io/blakeblackshear/frigate:$FRIGATE_VERSION"
     echo "  HW Accel:        $ENABLE_IGPU ($DETECTED_GPU)"
-    if [ "$ENABLE_IGPU" = "yes" ] && [ "$SELECTED_GPU_TYPE" != "nvidia" ]; then
-        echo "  Render Node:     $SELECTED_RENDER_NODE"
+    if [ ${#SELECTED_RENDER_NODES[@]} -gt 0 ]; then
+        echo "  Render Node(s):  ${SELECTED_RENDER_NODES[*]}"
+    fi
+    if [ ${#SELECTED_NVIDIA_INDEXES[@]} -gt 0 ]; then
+        echo "  NVIDIA GPU ID(s):${SELECTED_NVIDIA_INDEXES[*]}"
     fi
     echo "  Web Port:        $FRIGATE_PORT"
     echo "  go2rtc Port:     $GO2RTC_PORT"
@@ -1090,13 +1177,13 @@ configure_lxc_passthrough() {
     local lxc_conf="/etc/pve/lxc/${CT_ID}.conf"
     
     if [ "$DRY_RUN" = false ]; then
-        # Common Passthrough for iGPU / Render Nodes
-        if [ "$ENABLE_IGPU" = "yes" ]; then
-            if [ "$SELECTED_GPU_TYPE" = "intel" ] || [ "$SELECTED_GPU_TYPE" = "amd" ] || [ "$SELECTED_GPU_TYPE" = "vaapi" ]; then
-                configure_igpu_passthrough
-            elif [ "$SELECTED_GPU_TYPE" = "nvidia" ]; then
-                configure_nvidia_passthrough
-            fi
+        if [ ${#SELECTED_RENDER_NODES[@]} -gt 0 ]; then
+            for node in "${SELECTED_RENDER_NODES[@]}"; do
+                configure_igpu_passthrough "$node"
+            done
+        fi
+        if [ "$ENABLE_NVIDIA_PASSTHROUGH" = true ]; then
+            configure_nvidia_passthrough
         fi
         
         # Coral Passthrough
@@ -1109,24 +1196,22 @@ configure_lxc_passthrough() {
 }
 
 configure_igpu_passthrough() {
-    if [[ "$SELECTED_GPU_TYPE" != "intel" && "$SELECTED_GPU_TYPE" != "amd" && "$SELECTED_GPU_TYPE" != "vaapi" ]]; then
-        return
-    fi
+    local node="$1"
     
-    log_step "Configuring iGPU passthrough..."
+    log "Configuring passthrough for DRI render node: $node..."
     
     local lxc_conf="/etc/pve/lxc/${CT_ID}.conf"
     
     # Get device major/minor and GID
-    local dev_major=$(stat -c '%t' "$SELECTED_RENDER_NODE")
+    local dev_major=$(stat -c '%t' "$node")
     dev_major=$((0x$dev_major))
-    local dev_minor=$(stat -c '%T' "$SELECTED_RENDER_NODE")
+    local dev_minor=$(stat -c '%T' "$node")
     dev_minor=$((0x$dev_minor))
     
     local render_gid
     render_gid=$(getent group render 2>/dev/null | cut -d: -f3)
     if [ -z "$render_gid" ]; then
-        render_gid=$(stat -c '%g' "$SELECTED_RENDER_NODE")
+        render_gid=$(stat -c '%g' "$node")
     fi
 
     # Check PVE version
@@ -1137,36 +1222,37 @@ configure_igpu_passthrough() {
         pve_82_plus=false
     fi
 
-    if [ "$DRY_RUN" = false ]; then
-        if [ "$pve_82_plus" = true ]; then
-            # Modern Proxmox 8.2+ way (Works for both Privileged/Unprivileged)
-            local dev_slot=0
-            while grep -q "^dev${dev_slot}:" "$lxc_conf" 2>/dev/null; do
-                dev_slot=$((dev_slot + 1))
-            done
-            echo "" >> "$lxc_conf"
-            echo "# Frigate: iGPU Passthrough + AppArmor" >> "$lxc_conf"
-            echo "dev${dev_slot}: $SELECTED_RENDER_NODE,gid=$render_gid" >> "$lxc_conf"
+    if [ "$pve_82_plus" = true ]; then
+        # Modern Proxmox 8.2+ way (Works for both Privileged/Unprivileged)
+        local dev_slot=0
+        while grep -q "^dev${dev_slot}:" "$lxc_conf" 2>/dev/null; do
+            dev_slot=$((dev_slot + 1))
+        done
+        echo "" >> "$lxc_conf"
+        echo "# Frigate: GPU DRI node passthrough ($node)" >> "$lxc_conf"
+        echo "dev${dev_slot}: $node,gid=$render_gid" >> "$lxc_conf"
+        
+        if ! grep -q "^lxc.apparmor.profile: unconfined" "$lxc_conf" 2>/dev/null; then
             echo "lxc.apparmor.profile: unconfined" >> "$lxc_conf"
-            log_success "iGPU passthrough and AppArmor configured in $lxc_conf"
-        else
-            # Legacy way (< 8.2)
-            echo "" >> "$lxc_conf"
-            echo "# Frigate: iGPU Passthrough + AppArmor" >> "$lxc_conf"
-            cat >> "$lxc_conf" << EOF
-lxc.cgroup2.devices.allow: c $dev_major:$dev_minor rwm
-lxc.mount.entry: $SELECTED_RENDER_NODE dev/dri/$(basename "$SELECTED_RENDER_NODE") none bind,optional,create=file
-lxc.apparmor.profile: unconfined
-EOF
-            if [ "$CT_PRIVILEGED" = "0" ]; then
-                log_warn "Unprivileged iGPU passthrough on Proxmox < 8.2 may require manual GID mapping."
-            fi
-            log_success "iGPU passthrough configured using legacy cgroup2 method"
         fi
-        REBOOT_REQUIRED=true
+        log_success "DRI node $node passthrough and AppArmor configured in $lxc_conf"
     else
-        log_dry_run "Add iGPU passthrough configuration to $lxc_conf"
+        # Legacy way (< 8.2)
+        echo "" >> "$lxc_conf"
+        echo "# Frigate: GPU DRI node passthrough ($node)" >> "$lxc_conf"
+        cat >> "$lxc_conf" << EOF
+lxc.cgroup2.devices.allow: c $dev_major:$dev_minor rwm
+lxc.mount.entry: $node dev/dri/$(basename "$node") none bind,optional,create=file
+EOF
+        if ! grep -q "^lxc.apparmor.profile: unconfined" "$lxc_conf" 2>/dev/null; then
+            echo "lxc.apparmor.profile: unconfined" >> "$lxc_conf"
+        fi
+        if [ "$CT_PRIVILEGED" = "0" ]; then
+            log_warn "Unprivileged DRI node $node passthrough on Proxmox < 8.2 may require manual GID mapping."
+        fi
+        log_success "DRI node $node passthrough configured using legacy cgroup2 method"
     fi
+    REBOOT_REQUIRED=true
 }
 
 configure_coral_pcie_passthrough() {
@@ -1218,7 +1304,7 @@ EOF
 }
 
 configure_nvidia_passthrough() {
-    if [ "$SELECTED_GPU_TYPE" != "nvidia" ]; then
+    if [ "$ENABLE_NVIDIA_PASSTHROUGH" != true ]; then
         return
     fi
     
@@ -1238,16 +1324,21 @@ configure_nvidia_passthrough() {
         if [ "$pve_82_plus" = true ]; then
             # Modern Proxmox 8.2+ way
             local nvidia_devs=(
-                "/dev/nvidia0"
                 "/dev/nvidiactl"
                 "/dev/nvidia-modeset"
                 "/dev/nvidia-uvm"
                 "/dev/nvidia-uvm-tools"
             )
+            for idx in "${SELECTED_NVIDIA_INDEXES[@]}"; do
+                nvidia_devs+=("/dev/nvidia$idx")
+            done
             
             echo "" >> "$lxc_conf"
             echo "# Frigate: NVIDIA GPU Passthrough + AppArmor" >> "$lxc_conf"
-            echo "lxc.apparmor.profile: unconfined" >> "$lxc_conf"
+            
+            if ! grep -q "^lxc.apparmor.profile: unconfined" "$lxc_conf" 2>/dev/null; then
+                echo "lxc.apparmor.profile: unconfined" >> "$lxc_conf"
+            fi
             
             for dev in "${nvidia_devs[@]}"; do
                 if [ -c "$dev" ]; then
@@ -1265,7 +1356,6 @@ configure_nvidia_passthrough() {
             log_success "NVIDIA GPU device nodes configured using modern dev method"
         else
             # Legacy way
-            # Device Nodes
             if ! grep -q "nvidia" "$lxc_conf"; then
                 # Get major numbers for devices (Resilience for Issue #30)
                 local nvidia_major=$(ls -l /dev/nvidiactl 2>/dev/null | awk '{print $5}' | cut -d, -f1 || echo "195")
@@ -1274,15 +1364,21 @@ configure_nvidia_passthrough() {
                 cat >> "$lxc_conf" << EOF
 
 # Frigate: NVIDIA GPU Passthrough + AppArmor
-lxc.apparmor.profile: unconfined
 lxc.cgroup2.devices.allow: c $nvidia_major:* rwm
 lxc.cgroup2.devices.allow: c $uvm_major:* rwm
-lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
 lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
 lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,create=file
 lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
 lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
 EOF
+                for idx in "${SELECTED_NVIDIA_INDEXES[@]}"; do
+                    echo "lxc.mount.entry: /dev/nvidia$idx dev/nvidia$idx none bind,optional,create=file" >> "$lxc_conf"
+                done
+                
+                if ! grep -q "^lxc.apparmor.profile: unconfined" "$lxc_conf" 2>/dev/null; then
+                    echo "lxc.apparmor.profile: unconfined" >> "$lxc_conf"
+                fi
+                
                 log_success "NVIDIA GPU device nodes configured in $lxc_conf (Major: $nvidia_major, $uvm_major)"
             fi
         fi
@@ -1374,7 +1470,7 @@ start_lxc_container() {
         
         log_success "Container $CT_ID is running"
         
-        if [ "$SELECTED_GPU_TYPE" = "nvidia" ]; then
+        if [ "$ENABLE_NVIDIA_PASSTHROUGH" = true ]; then
             log "Updating library cache inside container..."
             pct exec "$CT_ID" -- ldconfig || log_warn "Failed to run ldconfig inside container."
         fi
@@ -1408,7 +1504,7 @@ install_docker() {
 }
 
 install_nvidia_toolkit() {
-    if [ "$SELECTED_GPU_TYPE" != "nvidia" ]; then
+    if [ "$ENABLE_NVIDIA_PASSTHROUGH" != true ]; then
         return
     fi
     
@@ -1421,6 +1517,9 @@ install_nvidia_toolkit() {
     execute_in_container "DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-container-toolkit"
     
     execute_in_container "nvidia-ctk runtime configure --runtime=docker"
+    if [ "$CT_PRIVILEGED" = "0" ]; then
+        execute_in_container "nvidia-ctk config --set nvidia-container-cli.no-cgroups --in-place"
+    fi
     execute_in_container "systemctl restart docker"
     
     log_success "NVIDIA Container Toolkit installed"
@@ -1445,19 +1544,32 @@ create_docker_compose() {
     local devices_list=""
     local deploy_config=""
 
-    # 1. Handle GPU Acceleration (NVIDIA vs Others)
-    if [ "$ENABLE_IGPU" = "yes" ]; then
-        if [ "$SELECTED_GPU_TYPE" = "nvidia" ]; then
-            deploy_config="    deploy:
+    # 1. Handle GPU Acceleration (both can be enabled simultaneously)
+    if [ ${#SELECTED_RENDER_NODES[@]} -gt 0 ]; then
+        for node in "${SELECTED_RENDER_NODES[@]}"; do
+            if [ -n "$devices_list" ]; then
+                devices_list="$devices_list
+      - $node:$node"
+            else
+                devices_list="      - $node:$node"
+            fi
+        done
+    fi
+    if [ "$ENABLE_NVIDIA_PASSTHROUGH" = true ]; then
+        local ids_list=()
+        for idx in "${SELECTED_NVIDIA_INDEXES[@]}"; do
+            ids_list+=("'$idx'")
+        done
+        local ids_str
+        ids_str=$(IFS=,; echo "${ids_list[*]}")
+        
+        deploy_config="    deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: [$ids_str]
               capabilities: [gpu, video]"
-        else
-            devices_list="      - $SELECTED_RENDER_NODE:$SELECTED_RENDER_NODE"
-        fi
     fi
 
     # 2. Add Coral PCIe if detected
@@ -1491,11 +1603,11 @@ $deploy_config"
         FRIGATE_RTSP_PASSWORD=$(openssl rand -hex 16)
 
         local group_add_config=""
-        if [ "$ENABLE_IGPU" = "yes" ] && [ "$SELECTED_GPU_TYPE" != "nvidia" ]; then
+        if [ ${#SELECTED_RENDER_NODES[@]} -gt 0 ]; then
             local render_gid
             render_gid=$(getent group render 2>/dev/null | cut -d: -f3)
             if [ -z "$render_gid" ]; then
-                render_gid=$(stat -c '%g' "$SELECTED_RENDER_NODE")
+                render_gid=$(stat -c '%g' "${SELECTED_RENDER_NODES[0]}")
             fi
             group_add_config="    group_add:
       - \"$render_gid\""
@@ -1621,7 +1733,7 @@ create_frigate_config() {
   coral:
     type: edgetpu
     device: pci"
-    elif [ "$SELECTED_GPU_TYPE" = "intel" ] || [ "$SELECTED_GPU_TYPE" = "amd" ] || [ "$SELECTED_GPU_TYPE" = "vaapi" ]; then
+    elif [ ${#SELECTED_RENDER_NODES[@]} -gt 0 ]; then
         detector_config="detectors:
   ov:
     type: openvino
@@ -1643,7 +1755,7 @@ create_frigate_config() {
   input_dtype: float
   path: $YOLO_MODEL_PATH
   labelmap_path: /labelmap/coco-80.txt"
-    elif [ "$DETECTED_CORAL" = "none" ] && { [ "$SELECTED_GPU_TYPE" = "intel" ] || [ "$SELECTED_GPU_TYPE" = "amd" ] || [ "$SELECTED_GPU_TYPE" = "vaapi" ]; }; then
+    elif [ "$DETECTED_CORAL" = "none" ] && [ ${#SELECTED_RENDER_NODES[@]} -gt 0 ]; then
         # Frigate 0.17+ defaults to 320x320 tensor input; SSD MobileNet requires explicit 300x300
         yolo_model_config="model:
   width: 300
@@ -1865,6 +1977,17 @@ create_container_summary_dashboard() {
         coral_line="- Coral Detector: ${DETECTED_CORAL}\n"
     fi
 
+    local gpu_profile="None"
+    local total_dri=${#SELECTED_RENDER_NODES[@]}
+    local total_nv=${#SELECTED_NVIDIA_INDEXES[@]}
+    if [ $total_dri -gt 0 ] && [ $total_nv -gt 0 ]; then
+        gpu_profile="DRI/DRM ($total_dri node(s)) + NVIDIA GPU (ID: ${SELECTED_NVIDIA_INDEXES[*]}) (Hybrid)"
+    elif [ $total_dri -gt 0 ]; then
+        gpu_profile="DRI/DRM ($total_dri node(s))"
+    elif [ $total_nv -gt 0 ]; then
+        gpu_profile="NVIDIA GPU (ID: ${SELECTED_NVIDIA_INDEXES[*]})"
+    fi
+
     # Construct Markdown Description
     local description=$(echo -e "# Frigate Proxmox Script
 
@@ -1876,7 +1999,7 @@ create_container_summary_dashboard() {
 | Frigate Auth | https://${ip_address}:${AUTH_PORT:-8971} |
 
 **Hardware Profile**
-- GPU Acceleration: ${SELECTED_GPU_TYPE:-None}
+- GPU Acceleration: ${gpu_profile}
 ${coral_line}- SHM Size: ${SHM_SIZE:-512mb}
 - Resources: ${CT_RAM}MB RAM / ${CT_CORES} CPU Cores
 

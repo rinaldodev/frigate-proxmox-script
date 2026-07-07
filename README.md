@@ -194,13 +194,13 @@ If the script fails to detect your iGPU on these chips:
 1. Ensure the `intel-media-va-driver-non-free` is available (the script attempts to install this).
 2. You may need to add `i915.force_probe=*` to your GRUB/systemd-boot entries on the **Proxmox host** if using an older kernel.
 
-### SR-IOV (Virtual GPUs)
+### SR-IOV (Virtual GPUs) & Multi-GPU Systems
 
-This script supports **SR-IOV**. If you have enabled SR-IOV on your Proxmox host to split your iGPU into multiple Virtual Functions (VFs):
+This script fully supports **SR-IOV** and systems with multiple graphics cards:
 
-1. The script will detect multiple render nodes (e.g., `/dev/dri/renderD128`, `/dev/dri/renderD129`, etc.).
-2. You will be prompted to select which specific render node Frigate should use.
-3. The script will automatically map only that specific node to the Docker container.
+1. The script will detect all render nodes (e.g., `/dev/dri/renderD128`, `/dev/dri/renderD129`, etc.) on the host.
+2. You will be prompted to individually enable or disable each render node.
+3. The script will automatically map all of your selected render nodes to both the LXC container and the Docker compose configuration.
 4. **Note**: Ensure you have the `intel-i915-dkms` drivers installed on your host for SR-IOV support on 12th Gen+ Intel hardware.
 
 ### Verify Hardware Acceleration
